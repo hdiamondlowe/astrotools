@@ -24,9 +24,14 @@ from time import perf_counter
 
 print("Pandeia engine versions:", pandeia.engine.pandeia_version())
 
-miri_arrays_descending = ['full', 'brightsky', 'sub256', 'sub128', 'sub64']
+'''
+This class is to help make some basic S/N calculations for observing secondary eclipse with MIRI Imaging TSO.
+It shoudl keep working with updated versions of pandeia
+This was adapted from a much messier code and could use some clean-up, but it's fine for now.
+--- H. Diamond-Lowe 18-07-2024
+'''
 
-#from time import time_ns
+miri_arrays_descending = ['full', 'brightsky', 'sub256', 'sub128', 'sub64']
 
 class MIRIImaging_Observation_Eclipse:
     def __init__(self, target, filter="f1500w", subarray="sub256", nobs=1,
