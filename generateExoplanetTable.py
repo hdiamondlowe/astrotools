@@ -1,7 +1,9 @@
 import pyvo as vo
 from astropy.io import ascii
+import requests
+import json
 
-def generateTransitingExoTable(outputpath=".", sy_dist_upper=25, st_rad_upper=0.59, st_mass_upper=0.58, pl_rade_upper=1.85, pl_per_upper=30):
+def generateTransitingExoTable(sy_dist_upper=25, st_rad_upper=0.59, st_mass_upper=0.58, pl_rade_upper=1.85, pl_per_upper=30, outputpath="."):
     """
     This code will generate a table of transiting planets from the NASA Exoplanet Archive.
     It is written for pulling lists of small planets, but parameters can be adjusted as needed.
@@ -50,7 +52,7 @@ def generateTransitingExoTable(outputpath=".", sy_dist_upper=25, st_rad_upper=0.
 
     return transitingPlanetSystems
 
-def generateExoTable(outputpath=".", sy_dist_upper=25, st_rad_upper=0.59, st_mass_upper=0.58, pl_per_upper=30):
+def generateExoTable(sy_dist_upper=25, st_rad_upper=0.59, st_mass_upper=0.58, pl_per_upper=30, outputpath="."):
     """
     This code will generate a table of planets, both transiting and non-transiting from the NASA Exoplanet Archive.
     It is written for pulling lists of small planets, but parameters can be adjusted as needed.
@@ -97,7 +99,7 @@ def generateExoTable(outputpath=".", sy_dist_upper=25, st_rad_upper=0.59, st_mas
 
     return planetSystems
 
-def generateExoSystem(outputpath=".", hostname="LTT 1445 A"):
+def generateExoSystem(hostname, outputpath="."):
     """
     This code will generate a table of transiting planets from the NASA Exoplanet Archive.
     It is written for pulling lists of small planets, but parameters can be adjusted as needed.
@@ -147,3 +149,28 @@ def generateExoSystem(outputpath=".", hostname="LTT 1445 A"):
     ascii.write(planetSystem, outputpath+f'/{tablename}.dat', overwrite=True) 
 
     return planetSystem
+
+def get_system_aliases(hostname):
+    """Fetches aliases for an exoplanet system from the NASA Exoplanet Archive.
+
+    Args:
+        hostname (str): Name of the object (e.g., "LTT 1445 A b").
+
+    Returns:
+        dict: A dictionary containing the aliases if found, or None if not found.
+
+    Example:
+        aliases = GenTab.get_system_aliases(hostname)
+        default_hostname = result['manifest']['resolved_name']
+    """
+    base_url = "https://exoplanetarchive.ipac.caltech.edu/cgi-bin/Lookup/nph-aliaslookup.py"
+    url = f"{base_url}?objname={hostname}"
+
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # Check for HTTP errors
+        alias_dict = json.loads(response.text)
+        return alias_dict
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching aliases for {hostname}: {e}")
+        return None
