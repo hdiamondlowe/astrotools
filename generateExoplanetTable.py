@@ -145,8 +145,8 @@ def generateExoSystem(hostname, outputpath="."):
 
     tablename = f'NASAExoArchive_ExoplanetSystem_{hostname.replace(" ","")}'
 
-    print('Writing table to {}'.format(outputpath+f'/{tablename}.dat'))
-    ascii.write(planetSystem, outputpath+f'/{tablename}.dat', overwrite=True) 
+    print('Writing table to {}'.format(outputpath+f'/{tablename}.ecsv'))
+    ascii.write(planetSystem, outputpath+f'/{tablename}.ecsv', format='ecsv', overwrite=True) 
 
     return planetSystem
 

@@ -22,6 +22,9 @@ from pandeia.engine.calc_utils import build_default_calc
 from pandeia.engine.perform_calculation import perform_calculation
 from time import perf_counter
 
+import warnings
+warnings.filterwarnings('ignore')
+
 print("Pandeia engine versions:", pandeia.engine.pandeia_version())
 
 '''
@@ -55,13 +58,23 @@ class MIRIImaging_Observation_Eclipse:
         self.miri_imaging_ts = {}
         self.miri_imaging_ts_calibration = {}
 
-    def get_target_timing(self, verbose=True):
+        if self.target['pl_ratror'] == None:
+            print("Calculating Rp/Rs from separate Rp and Rs")
+            self.target['pl_ratror'] = ((self.target['pl_rade']*u.R_earth)/(self.target['st_rad']*u.R_sun)).decompose().value
+        if self.target['pl_ratdor'] == 0.0:
+            print("Calculating a/Rs from separate a and Rs")
+            self.target['pl_ratdor'] = ((self.target['pl_orbsmax']*u.AU)/(self.target['st_rad']*u.R_sun)).decompose().value
+
+        print(self.target['pl_ratdor'])
+        
+
+    def get_target_timing(self):
         '''
         stellar_spec --- 'default' --> will use pysynphot to make a PHOENIX spctrum
                          'input'   --> will use input_spec
         '''
     
-        if verbose: 
+        if self.verbose: 
             print(self.target)    
             print(f'***Using filter={self.filter}, subarray={self.subarray}, frac_fullwell={self.frac_fullwell}, nobs={self.nobs}')
             
@@ -83,7 +96,7 @@ class MIRIImaging_Observation_Eclipse:
         mingroups = 5           # suggested for MIRI Imaging TSO
      
         approx_obs_time = (self.tdur + self.tfrac*self.tdur + tsettle + tcharge).to(u.hr)
-        if verbose: print('Approximate observing time per eclipse observation:', approx_obs_time)
+        if self.verbose: print('Approximate observing time per eclipse observation:', approx_obs_time)
 
         if self.stellar_spec == 'default':
             Phoenix_spec = pysynphot.Icat('phoenix', Teff=self.target['st_teff'], metallicity=0.0, log_g=self.target['st_logg'])
@@ -97,8 +110,8 @@ class MIRIImaging_Observation_Eclipse:
         if self.find_best_subarray:
             for subarray in miri_arrays_descending:     
                 # make the pandeia dictionary for miri
-                print(f'Testing subarray {subarray}')
-                miri_imaging_ts = self.make_miri_dict(subarray, scene_spec='input', input_spec=self.input_spec, verbose=verbose)
+                if self.verbose: print(f'Testing subarray {subarray}')
+                miri_imaging_ts = self.make_miri_dict(subarray, scene_spec='input', input_spec=self.input_spec)
 
                 report = perform_calculation(miri_imaging_ts)
                 ngroups = int(report['scalar']['sat_ngroups']*self.frac_fullwell)
@@ -108,7 +121,7 @@ class MIRIImaging_Observation_Eclipse:
                     break
         else: 
             # make the pandeia dictionary for miri
-            miri_imaging_ts = self.make_miri_dict(self.subarray, scene_spec='input', input_spec=self.input_spec, verbose=verbose)
+            miri_imaging_ts = self.make_miri_dict(self.subarray, scene_spec='input', input_spec=self.input_spec)
       
             report = perform_calculation(miri_imaging_ts)
             print('ngroups before for saturation:', report['scalar']['sat_ngroups'])
@@ -125,8 +138,9 @@ class MIRIImaging_Observation_Eclipse:
         miri_imaging_ts['configuration']['detector']['ngroup'] = self.ngroups
         report = perform_calculation(miri_imaging_ts)
 
-        print('ETC Warnings:')
-        print(report['warnings']) # should be empty if nothing is wrong
+        if self.verbose:
+            print('ETC Warnings:')
+            print(report['warnings']) # should be empty if nothing is wrong
         
         tframe  = report['information']['exposure_specification']['tframe'] * u.s
         tint    = tframe * self.ngroups                         # amount of time per integration
@@ -135,7 +149,7 @@ class MIRIImaging_Observation_Eclipse:
         nint    = (self.tdur/(tint + treset)).decompose()      # number of in-transit integrations
         ref_wave = report['scalar']['reference_wavelength']                         * u.micron
         
-        if verbose: 
+        if self.verbose: 
             print('Timing for each observation')
             print('    Number of groups per integration (ngroups)', ngroups)
             print('    Time to take one frame (tframe)', tframe)
@@ -175,7 +189,8 @@ class MIRIImaging_Observation_Eclipse:
         cadence         = self.timing['cadence']
         ref_wave        = self.timing['ref_wave']
         nint            = self.timing['nint']
-        
+
+
         # the wavelength and throughput of the designated filter
         bandpass_wave = report['1d']['fp'][0]
         bandpass_flux = report['1d']['fp'][1]
@@ -183,8 +198,9 @@ class MIRIImaging_Observation_Eclipse:
         # make a special dictionary, based off of the first MIRI dictionary, to get flux in useful units
         miri_imaging_ts_calibration = self.make_miri_calib_dict(miri_imaging_ts)
         report_calibration = perform_calculation(miri_imaging_ts_calibration)
-        print('Calibartion Warnings:')
-        print(report_calibration['warnings']) #should be empty if nothing is wrong
+        if self.verbose:
+            print('Calibartion Warnings:')
+            print(report_calibration['warnings']) #should be empty if nothing is wrong
         
         # compute uncertainty in a single measurement
         snr = report['scalar']['sn']
@@ -208,6 +224,7 @@ class MIRIImaging_Observation_Eclipse:
         tstart = (self.target['pl_orbper']*u.day)*0.5 - (tdur/2) - (tdur*tfrac/2)
         tend   = (self.target['pl_orbper']*u.day)*0.5 + (tdur/2) + (tdur*tfrac/2)
         trange = tend - tstart
+
         total_int = int(np.ceil((trange/cadence).decompose()))
 
         signal_ts = np.ones(total_int)*signal
@@ -216,7 +233,7 @@ class MIRIImaging_Observation_Eclipse:
         signal_ts_scatter = signal_ts.value + scatter_ts.value
         
         # now get some model atmospehres, either from actual models, or from Teq calculations
-        models = OrderedDict()
+        self.models = OrderedDict()
         
         if Fp_Fs_from_model:
             all_spec = get_all_model_spec(self.target)  # this is super specific to the models Joao made for the proposal 
@@ -227,11 +244,11 @@ class MIRIImaging_Observation_Eclipse:
                 bandpass_inds = (wave>bandpass_wave[0]) * (wave<bandpass_wave[-1])
                 model_binned_to_bandpass = np.mean(fpfs[bandpass_inds])
                 
-                models[model] = {}
-                models[model]['wave'] = wave
-                models[model]['fpfs'] = fpfs
-                models[model]['wave_band'] = ref_wave
-                models[model]['fpfs_band'] = model_binned_to_bandpass
+                self.models[model] = {}
+                self.models[model]['wave'] = wave
+                self.models[model]['fpfs'] = fpfs
+                self.models[model]['wave_band'] = ref_wave
+                self.models[model]['fpfs_band'] = model_binned_to_bandpass
 
 
         wave_range = np.linspace(0.7, 25, 100) * u.micron
@@ -241,17 +258,17 @@ class MIRIImaging_Observation_Eclipse:
             # and for an equilibrum temperature (perfect circulation) case
             for case in ['bare_rock', 'equilibrium']:
                 T_day   = self.calc_Tday(A, atmo=case)
-                Fp_Fs   = self.calc_FpFs(T_day, wave_range)
-                amp_day = self.calc_FpFs(T_day, ref_wave)
+                Fp_Fs   = self.calc_FpFs(T_day, wave_range, self.input_spec)
+                amp_day = self.calc_FpFs(T_day, ref_wave, self.input_spec)
 
-                models[case+f'_{A}A'] = {}
-                models[case+f'_{A}A']['wave']      = wave_range
-                models[case+f'_{A}A']['fpfs']      = Fp_Fs
-                models[case+f'_{A}A']['wave_band'] = ref_wave
-                models[case+f'_{A}A']['fpfs_band'] = amp_day
-                models[case+f'_{A}A']['T_day']     = T_day
+                self.models[case+f'_{A}A'] = {}
+                self.models[case+f'_{A}A']['wave']      = wave_range
+                self.models[case+f'_{A}A']['fpfs']      = Fp_Fs
+                self.models[case+f'_{A}A']['wave_band'] = ref_wave
+                self.models[case+f'_{A}A']['fpfs_band'] = amp_day
+                self.models[case+f'_{A}A']['T_day']     = T_day
 
-                print(case, ':', T_day)
+                if self.verbose: print(case, ':', T_day)
                 
         # use batman to make the system; 
         batman_params = self.initialize_batman_model()
@@ -269,92 +286,102 @@ class MIRIImaging_Observation_Eclipse:
             
             return time_binned, signal_ts_scatter_binned, npoints_per_bin
         
-        fig = plt.figure(figsize=(15,10))
-        gs = gridspec.GridSpec(1, 3, left=0.07, right=0.99, bottom=0.1, top=0.93)
+        if display_figure:
+            fig = plt.figure(figsize=(15,10))
+            gs = gridspec.GridSpec(1, 3, left=0.07, right=0.99, bottom=0.1, top=0.93)
 
-        figure = {}
-        figure['lc'] = fig.add_subplot(gs[0,0:2])
-        figure['FpFs'] = fig.add_subplot(gs[0,2])
+            figure = {}
+            figure['lc'] = fig.add_subplot(gs[0,0:2])
+            figure['FpFs'] = fig.add_subplot(gs[0,2])
 
         # conservative assumption for small eclipse depths -- fine to first order
         yerr = (1/report['scalar']['sn']) * (1/np.sqrt(nint)) * (1/np.sqrt(nobs)) * np.sqrt(1 + (1/tfrac))
+        self.yerr = yerr
 
         if Fp_Fs_from_model:
             # based on Joao's model where the bare rock case is called "noatm"
-            bare_rock_key = [x for x in models.keys() if 'alb01' in x]
-            bar_atm_key   = [x for x in models.keys() if '10b' in x]
+            bare_rock_key = [x for x in self.models.keys() if 'alb01' in x]
+            bar_atm_key   = [x for x in self.models.keys() if '10b' in x]
             
             cases = np.hstack([bare_rock_key, bar_atm_key])
 
-        else: cases = np.hstack(list(models.keys()))
+        else: cases = np.hstack(list(self.models.keys()))
             
         line_styles = ['-', '--', ':']
         colors = ['C3', 'C0', 'C1', 'C2', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9']
 
         np.random.seed(50)
-        draw_eclipse_depth_bare_rock = np.random.normal(models[cases[0]]['fpfs_band'], yerr, ndraws)
+        draw_eclipse_depth_bare_rock = np.random.normal(self.models[cases[0]]['fpfs_band'], yerr, ndraws)
         dof = 1  # rough estimate; only 1 data point
         
         for i, case in enumerate(cases):       
-            flux = self.get_batman_lightcurve(models[case]['fpfs_band'], time)
+            flux = self.get_batman_lightcurve(self.models[case]['fpfs_band'], time)
             time_binned, signal_ts_scatter_binned, npoints_per_bin = get_binned_signal(flux)
             
             if i==0: 
-                figure['lc'].plot(time, ((signal_ts_scatter*flux/signal).value-1)*1e6 , 
-                                  '.', color='k', alpha=0.3, markeredgecolor='w',
-                                  label=f'Cadence={np.round(cadence, 2)}; ngroups={ngroups}')
-                
-                binned_error = np.sqrt(npoints_per_bin*noise**2) / npoints_per_bin / signal
-                figure['lc'].errorbar(time_binned, ((signal_ts_scatter_binned/signal).value -1)*1e6, 
-                                  yerr=binned_error*1e6, fmt='o', color='k', alpha=1)
-                
-                # only plot error bar for bare rock case in Fp/Fs figure
-                figure['FpFs'].errorbar(models[case]['wave_band'].value, models[case]['fpfs_band'] *1e6, yerr=yerr.value *1e6, fmt='.', color='k', alpha=0.8, zorder=1000)
-                print('Data point:', models[case]['fpfs_band']*1e6, '+/-', yerr*1e6, 'ppm')
 
-            figure['lc'].plot(time, ((signal_ts*flux/signal).value-1)*1e6, 
-                              ls=line_styles[i%3], lw=3, color=colors[i], label=case)
+                binned_error = np.sqrt(npoints_per_bin*noise**2) / npoints_per_bin / signal
+
+                if display_figure:
+                    figure['lc'].plot(time, ((signal_ts_scatter*flux/signal).value-1)*1e6 , 
+                                      '.', color='k', alpha=0.3, markeredgecolor='w',
+                                      label=f'Cadence={np.round(cadence, 2)}; ngroups={ngroups}')
+                    
+                    figure['lc'].errorbar(time_binned, ((signal_ts_scatter_binned/signal).value -1)*1e6, 
+                                      yerr=binned_error*1e6, fmt='o', color='k', alpha=1)
+                    
+                    # only plot error bar for bare rock case in Fp/Fs figure
+                    figure['FpFs'].errorbar(self.models[case]['wave_band'].value, self.models[case]['fpfs_band'] *1e6, yerr=yerr.value *1e6, fmt='.', color='k', alpha=0.8, zorder=1000)
+                if self.verbose: print('Data point:', self.models[case]['fpfs_band']*1e6, '+/-', yerr*1e6, 'ppm')
+
+            if display_figure: figure['lc'].plot(time, ((signal_ts*flux/signal).value-1)*1e6, 
+                                                ls=line_styles[i%3], lw=3, color=colors[i], label=case)
             
-        for i, model in enumerate(models):
-            print(model)
+        for i, model in enumerate(self.models):
+            if self.verbose: print(model)
             
-            chisq = self.calc_chi_sq(models[model]['fpfs_band'], draw_eclipse_depth_bare_rock, yerr) / ndraws # can do this trick since only 1 data point
-            print('    chisq_red', chisq)
+            chisq = self.calc_chi_sq(self.models[model]['fpfs_band'], draw_eclipse_depth_bare_rock, yerr) / ndraws # can do this trick since only 1 data point
+            if self.verbose: print('    chisq_red', chisq)
             sigma = self.calc_significance(chisq, dof)
-            print('    sigma', sigma)
+            if self.verbose: print('    sigma', sigma)
+
+            self.models[model]['chisq'] = chisq
+            self.models[model]['sigma'] = sigma
             
-            figure['FpFs'].plot(models[model]['wave'], models[model]['fpfs'] *1e6, lw=3, color=colors[i%10], label=model+f', {sigma:.2f}$\sigma$')
-            figure['FpFs'].plot(models[model]['wave_band'].value, models[model]['fpfs_band']*1e6, 's', color=colors[i%10])
+            if display_figure:
+                figure['FpFs'].plot(self.models[model]['wave'], self.models[model]['fpfs'] *1e6, lw=3, color=colors[i%10], label=model+f', {sigma:.2f}$\sigma$')
+                figure['FpFs'].plot(self.models[model]['wave_band'].value, self.models[model]['fpfs_band']*1e6, 's', color=colors[i%10])
 
             # compare bare rock case to atmosphere case
         
-        figure['lc'].axvline(0.5, ls=':', color='k', alpha=0.5)
-        figure['lc'].axvline(0.5-tdur.value/self.target['pl_orbper']/2, ls='--', color='k', alpha=0.5)
-        figure['lc'].axvline(0.5+tdur.value/self.target['pl_orbper']/2, ls='--', color='k', alpha=0.5)
+        if display_figure:
+            figure['lc'].axvline(0.5, ls=':', color='k', alpha=0.5)
+            figure['lc'].axvline(0.5-tdur.value/self.target['pl_orbper']/2, ls='--', color='k', alpha=0.5)
+            figure['lc'].axvline(0.5+tdur.value/self.target['pl_orbper']/2, ls='--', color='k', alpha=0.5)
 
-        figure['lc'].legend(loc='upper right')
-        per = self.target['pl_orbper']
-        k_mag = self.target['sy_kmag']
-        figure['lc'].set_title(self.target['pl_name']+f', Kmag={k_mag}, {nobs} obs, Tdur = {np.round(tdur.to(u.min), 2)}, P={np.round(per, 3)} days', fontsize=16)
+            figure['lc'].legend(loc='upper right')
+            per = self.target['pl_orbper']
+            k_mag = self.target['sy_kmag']
+            figure['lc'].set_title(self.target['pl_name']+f', Kmag={k_mag}, {nobs} obs, Tdur = {np.round(tdur.to(u.min), 2)}, P={np.round(per, 3)} days', fontsize=16)
 
-        figure['lc'].set_xlabel('Phase', fontsize=14)
-        figure['lc'].set_ylabel('Normalized Flux (ppm)', fontsize=14)
+            figure['lc'].set_xlabel('Phase', fontsize=14)
+            figure['lc'].set_ylabel('Normalized Flux (ppm)', fontsize=14)
 
-        figure['lc'].grid(alpha=0.4)
-        figure['lc'].set_ylim(-0.3*np.std(((signal_ts_scatter*flux/signal).value-1)*1e6), 0.3*np.std((signal_ts_scatter*flux/signal).value-1)*1e6)
+            figure['lc'].grid(alpha=0.4)
+            figure['lc'].set_ylim(-0.2*np.std(((signal_ts_scatter*flux/signal).value-1)*1e6), 0.5*np.std((signal_ts_scatter*flux/signal).value-1)*1e6)
+            
+            figure['FpFs'].legend(loc='upper left')
+            figure['FpFs'].set_ylabel('$F_p$/$F_s$ (ppm)', fontsize=14)
+            figure['FpFs'].set_xlabel('Wavelength ($\mu$m)', fontsize=14)
         
-        figure['FpFs'].legend(loc='upper left')
-        figure['FpFs'].set_ylabel('$F_p$/$F_s$ (ppm)', fontsize=14)
-        figure['FpFs'].set_xlabel('Wavelength ($\mu$m)', fontsize=14)
-        
-        if Fp_Fs_from_model: figure['FpFs'].set_title(f'{nobs} obs', fontsize=16)
-        else:
-            T_rock = np.rint(models[f'bare_rock_{Albedos[0]}A']['T_day'])
-            figure['FpFs'].set_title(f'T_day,rock = {T_rock}, {nobs} obs', fontsize=16)
+            if Fp_Fs_from_model: figure['FpFs'].set_title(f'{nobs} obs', fontsize=16)
+            else:
+                T_rock = np.rint(self.models[f'bare_rock_{Albedos[0]}A']['T_day'])
+                figure['FpFs'].set_title(f'T_day,rock = {T_rock}, {nobs} obs', fontsize=16)
 
-        figure['FpFs'].set_xlim(0.7, 25)
-        figure['FpFs'].grid(alpha=0.4)
-        #figure['FpFs'].set_ylim(-10, 400)
+            figure['FpFs'].set_xlim(0.7, 25)
+            figure['FpFs'].grid(alpha=0.4)
+            #figure['FpFs'].set_ylim(-10, 400)
 
         plname = self.target['pl_name'].replace(' ','')  # w/o spaces
         if save_figure: plt.savefig(f'../sample/model_observations/{plname}_{filter}_{subarray}_{nobs}obs.png', facecolor='white')
@@ -378,7 +405,7 @@ class MIRIImaging_Observation_Eclipse:
         background    -- list of two lists containing wavelength (um) and background counts (mJy/sr)
         """
         
-        print('Computing background')
+        if self.verbose: print('Computing background')
 
         if not os.path.exists(savepath): os.makedirs(savepath)
 
@@ -407,14 +434,14 @@ class MIRIImaging_Observation_Eclipse:
 
             ascii.write(background, savepath+f"{sys_name}_background.txt", overwrite=True)
             
-            print('Returning background')
+            if self.verbose: print('Returning background')
             return background
         
         if make_new_bkg: background = bkg()
 
         else: 
             try: 
-                print('Using existing background')
+                if self.verbose: print('Using existing background')
                 background = ascii.read(savepath+f"{sys_name}_background.txt")
                 background = [list(background['col0']), list(background['col1'])]
             except:
@@ -422,7 +449,7 @@ class MIRIImaging_Observation_Eclipse:
         
         return background
 
-    def make_miri_dict(self, subarray, pull_default_dict=False, scene_spec='phoenix', key='m5v', input_spec=[], savepath='./', verbose=False):
+    def make_miri_dict(self, subarray, pull_default_dict=False, scene_spec='phoenix', key='m5v', input_spec=[], savepath='./'):
         """
         Code to make the initial miri dictionally for imaging_ts
         
@@ -440,7 +467,7 @@ class MIRIImaging_Observation_Eclipse:
                              In an ndarray, wavelength is the 0th index, and flux the 1st index.
         """
 
-        if verbose: print('Creating MIRI dictionary')
+        if self.verbose: print('Creating MIRI dictionary')
 
         def pull_dict_from_stsci():
             miri_imaging_ts = build_default_calc('jwst', 'miri', 'imaging_ts')
@@ -505,18 +532,18 @@ class MIRIImaging_Observation_Eclipse:
             #try: miri_imaging_ts['scene'][0]['spectrum']['sed'].pop('key')
             #except(KeyError): pass
 
-        miri_imaging_ts['background'] = self.get_bkg(ref_wave, verbose=verbose)
+        miri_imaging_ts['background'] = self.get_bkg(ref_wave)
         miri_imaging_ts['background_level'] = 'high' # let's keep it conservative
 
         miri_imaging_ts['strategy']['aperture_size']  = 0.55            # values from Greene+ 2023 for T1-b
         miri_imaging_ts['strategy']['sky_annulus']    = [1.32, 2.8]     # assuming MIRI plate scale of 0.11"/pix
 
-        if verbose: print('Returning MIRI dictionary')
+        if self.verbose: print('Returning MIRI dictionary')
         return miri_imaging_ts
 
     def make_miri_calib_dict(self, miri_dict):
 
-        print('Creating MIRI calibration dictionary')
+        if self.verbose: print('Creating MIRI calibration dictionary')
 
         miri_imaging_ts_calibration = copy.deepcopy(miri_dict)
 
@@ -534,7 +561,7 @@ class MIRIImaging_Observation_Eclipse:
         miri_imaging_ts_calibration['scene'][0]['spectrum']['normalization']['norm_fluxunit'] = 'flam'
         miri_imaging_ts_calibration['scene'][0]['spectrum']['normalization'].pop('bandpass')
 
-        print('Returning MIRI calibration dictionary')
+        if self.verbose: print('Returning MIRI calibration dictionary')
 
         return miri_imaging_ts_calibration
 
@@ -575,9 +602,16 @@ class MIRIImaging_Observation_Eclipse:
         '''
 
         P     = self.target['pl_orbper']*u.day
-        Rp_Rs = self.target['pl_ratror']
-        a_Rs  = self.target['pl_ratdor']
         i     = self.target['pl_orbincl']
+
+        if self.target['pl_ratror'] == None:
+            print("Calculating Rp/Rs from separate Rp and Rs")
+            Rp_Rs = ((self.target['pl_rade']*u.R_earth)/(self.target['st_rad']*u.R_sun)).decompose().value
+        else: Rp_Rs = self.target['pl_ratror']
+        if self.target['pl_ratdor'] == 0.0:
+            print("Calculating a/Rs from separate a and Rs")
+            a_Rs = ((self.target['pl_orbsmax']*u.AU)/(self.target['st_rad']*u.R_sun)).decompose().value
+        else: a_Rs  = self.target['pl_ratdor']
 
         i = np.radians(i)
         b = a_Rs * np.cos(i)
@@ -585,19 +619,35 @@ class MIRIImaging_Observation_Eclipse:
         value = np.sqrt((1 + Rp_Rs)**2 - b**2) / a_Rs / np.sin(i)
         return P/np.pi * np.arcsin(value)
         
-    def calc_FpFs(self, T_p, wavelength):
+    def calc_FpFs(self, T_p, wavelength, input_spec=[]):
         
         ''' This function will take in the Temperature in Kelvin, 
         and the wavelength range that we are looking at,
         as well as the the radius of the star and the planet. '''
 
-        T_s = self.target['st_teff']*u.K
-        Rp_Rs = self.target['pl_ratror']
-        
-        bb_s = BlackBody(T_s, scale=1*u.erg/u.s/u.cm**2/u.AA/u.sr)
         bb_p = BlackBody(T_p, scale=1*u.erg/u.s/u.cm**2/u.AA/u.sr)
+
+        if self.target['pl_ratror'] == None:
+            print("Calculating Rp/Rs from separate Rp and Rs")
+            Rp_Rs = ((self.target['pl_rade']*u.R_earth)/(self.target['st_rad']*u.R_sun)).decompose().value
+        else: Rp_Rs = self.target['pl_ratror']
         
-        Flux_ratio = bb_p(wavelength)/bb_s(wavelength) * (Rp_Rs)**2
+        if len(input_spec) == 0:
+            T_s = self.target['st_teff']*u.K
+            bb_s = BlackBody(T_s, scale=1*u.erg/u.s/u.cm**2/u.AA/u.sr)
+
+            Flux_ratio = bb_p(wavelength)/bb_s(wavelength) * (Rp_Rs)**2
+
+        else:
+            input_spec_wave = self.input_spec[0]*u.um
+            input_spec_flux = self.input_spec[1]*u.mJy
+
+            input_spec_flux *= const.c / input_spec_wave**2 / (np.pi*u.sr)
+            input_spec_flux.to(u.erg/u.s/u.cm**2/u.AA/u.sr)
+
+            interp_spec_flux = np.interp(wavelength.to(u.um), input_spec_wave, input_spec_flux)
+
+            Flux_ratio = bb_p(wavelength) / interp_spec_flux * (Rp_Rs)**2    
             
         return Flux_ratio.decompose()
 
@@ -605,9 +655,15 @@ class MIRIImaging_Observation_Eclipse:
         # can be 'bare rock' or 'equilibrium'
         if   atmo == 'bare_rock': f = 2/3
         elif atmo == 'equilibrium': f = 1/4
+        else:
+            print("ERROR: We only recognize atmos cases of bare_rock or equilibrium")
+            return 0.0
 
         T_s = self.target['st_teff']*u.K
-        a_Rs = self.target['pl_ratdor']
+        if self.target['pl_ratdor'] == 0.0:
+            print("Calculating a/Rs from separate a and Rs")
+            a_Rs = ((self.target['pl_orbsmax']*u.AU)/(self.target['st_rad']*u.R_sun)).decompose().value
+        else: a_Rs  = self.target['pl_ratdor']
         
         T_day = T_s * np.sqrt(1/a_Rs) * (1 - albedo)**(1/4) * f**(1/4)
         
