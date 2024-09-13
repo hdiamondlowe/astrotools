@@ -58,14 +58,17 @@ class MIRIImaging_Observation_Eclipse:
         self.miri_imaging_ts = {}
         self.miri_imaging_ts_calibration = {}
 
+
         if self.target['pl_ratror'] == None:
             print("Calculating Rp/Rs from separate Rp and Rs")
             self.target['pl_ratror'] = ((self.target['pl_rade']*u.R_earth)/(self.target['st_rad']*u.R_sun)).decompose().value
         if self.target['pl_ratdor'] == 0.0:
             print("Calculating a/Rs from separate a and Rs")
             self.target['pl_ratdor'] = ((self.target['pl_orbsmax']*u.AU)/(self.target['st_rad']*u.R_sun)).decompose().value
+        if self.target['pl_orbincl'] == 0.0 or np.isnan(self.target['pl_orbincl']):
+            print("Calculating inclination from impact parameter")
+            self.target['pl_orbincl'] = self.inc(self.target['pl_ratdor'], self.target['pl_imppar'])
 
-        print(self.target['pl_ratdor'])
         
 
     def get_target_timing(self):
@@ -116,9 +119,10 @@ class MIRIImaging_Observation_Eclipse:
                 report = perform_calculation(miri_imaging_ts)
                 ngroups = int(report['scalar']['sat_ngroups']*self.frac_fullwell)
                 
+                self.subarray = subarray
                 if ngroups >= 20: 
-                    self.subarray = subarray
                     break
+                    # otherwise will go with the smallest subarray
         else: 
             # make the pandeia dictionary for miri
             miri_imaging_ts = self.make_miri_dict(self.subarray, scene_spec='input', input_spec=self.input_spec)
@@ -133,6 +137,8 @@ class MIRIImaging_Observation_Eclipse:
             ngroups+=1
         elif ngroups < mingroups:
             print('WARNING: THIS IS TOO FEW GROUPS!')
+        elif ngroups < 20:
+            print(f'WARNING: ngroups is {ngroups}, less than recommended ~20')
         
         self.ngroups = ngroups
         miri_imaging_ts['configuration']['detector']['ngroup'] = self.ngroups
@@ -173,7 +179,8 @@ class MIRIImaging_Observation_Eclipse:
 
         return self.timing
 
-    def model_target_obs(self, ndraws=1000, Fp_Fs_from_model=False, Albedos=[],
+    def model_target_obs(self, ndraws=1000, Fp_Fs_from_model=False, 
+                         Albedos=[], measurement_case='bare_rock',
                          display_figure=True, save_figure=False):
         # ... (Same as the original `model_target_obs` function) ...
 
@@ -294,7 +301,7 @@ class MIRIImaging_Observation_Eclipse:
             figure['lc'] = fig.add_subplot(gs[0,0:2])
             figure['FpFs'] = fig.add_subplot(gs[0,2])
 
-        # conservative assumption for small eclipse depths -- fine to first order
+        # conservative assumption for small eclipse depths -- fine to first order; DOES NOT WORK FOR TRANSITS/HJ ECLIPSES
         yerr = (1/report['scalar']['sn']) * (1/np.sqrt(nint)) * (1/np.sqrt(nobs)) * np.sqrt(1 + (1/tfrac))
         self.yerr = yerr
 
@@ -311,14 +318,14 @@ class MIRIImaging_Observation_Eclipse:
         colors = ['C3', 'C0', 'C1', 'C2', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9']
 
         np.random.seed(50)
-        draw_eclipse_depth_bare_rock = np.random.normal(self.models[cases[0]]['fpfs_band'], yerr, ndraws)
+        draw_eclipse_depth_measurement = np.random.normal(self.models[f'{measurement_case}_{Albedos[0]}A']['fpfs_band'], yerr, ndraws)
         dof = 1  # rough estimate; only 1 data point
         
         for i, case in enumerate(cases):       
             flux = self.get_batman_lightcurve(self.models[case]['fpfs_band'], time)
             time_binned, signal_ts_scatter_binned, npoints_per_bin = get_binned_signal(flux)
             
-            if i==0: 
+            if case==f'{measurement_case}_{Albedos[0]}A': 
 
                 binned_error = np.sqrt(npoints_per_bin*noise**2) / npoints_per_bin / signal
 
@@ -340,7 +347,7 @@ class MIRIImaging_Observation_Eclipse:
         for i, model in enumerate(self.models):
             if self.verbose: print(model)
             
-            chisq = self.calc_chi_sq(self.models[model]['fpfs_band'], draw_eclipse_depth_bare_rock, yerr) / ndraws # can do this trick since only 1 data point
+            chisq = self.calc_chi_sq(self.models[model]['fpfs_band'], draw_eclipse_depth_measurement, yerr) / ndraws # can do this trick since only 1 data point
             if self.verbose: print('    chisq_red', chisq)
             sigma = self.calc_significance(chisq, dof)
             if self.verbose: print('    sigma', sigma)
@@ -668,6 +675,14 @@ class MIRIImaging_Observation_Eclipse:
         T_day = T_s * np.sqrt(1/a_Rs) * (1 - albedo)**(1/4) * f**(1/4)
         
         return T_day
+
+    def inc(self, a_Rs, b):
+        '''
+        takes: scaled orbital distance a_Rs []
+               impact paramter b []
+        returns: inclination i [degrees]
+        '''
+        return np.degrees(np.arccos(b*(1./a_Rs)))
 
     def get_all_model_spec(targ):
         plnt_name = targ['pl_name'].replace(" ", "").replace("-", "")
