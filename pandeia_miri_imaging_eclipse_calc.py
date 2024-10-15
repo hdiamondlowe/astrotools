@@ -21,6 +21,8 @@ import pandeia.engine
 from pandeia.engine.calc_utils import build_default_calc
 from pandeia.engine.perform_calculation import perform_calculation
 from time import perf_counter
+from astropy.convolution import Gaussian1DKernel, convolve
+
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -179,7 +181,7 @@ class MIRIImaging_Observation_Eclipse:
 
         return self.timing
 
-    def model_target_obs(self, ndraws=1000, Fp_Fs_from_model=False, 
+    def model_target_obs(self, ndraws=1000, Fp_Fs_from_model=False, convolve_model=False,
                          Albedos=[], measurement_case='bare_rock',
                          display_figure=True, save_figure=False):
         # ... (Same as the original `model_target_obs` function) ...
@@ -218,15 +220,15 @@ class MIRIImaging_Observation_Eclipse:
         calibration_norm_value = report_calibration['input']['scene'][0]['spectrum']['normalization']['norm_flux']
 
         signal = extracted_flux / calibration_extracted_flux * calibration_norm_value  * u.erg/u.s/u.cm**2/u.AA
-        noise  = extracted_noise / calibration_extracted_flux * calibration_norm_value  * u.erg/u.s/u.cm**2/u.AA
+        noise_1obs  = extracted_noise / calibration_extracted_flux * calibration_norm_value  * u.erg/u.s/u.cm**2/u.AA
+        noise_nobs = noise_1obs/np.sqrt(self.nobs)
 
         if self.verbose: 
             print('Single integration info')
-            print('    Signal +/- Noise =', signal, '+/-', noise)
-            print('    Fractional uncertainty,', noise/signal)
+            print('    Signal +/- Noise =', signal, '+/-', noise_1obs)
+            print('    Fractional uncertainty,', noise_1obs/signal)
             print('    SNR', snr)
         
-        noise /= np.sqrt(self.nobs)
             
         tstart = (self.target['pl_orbper']*u.day)*0.5 - (tdur/2) - (tdur*tfrac/2)
         tend   = (self.target['pl_orbper']*u.day)*0.5 + (tdur/2) + (tdur*tfrac/2)
@@ -236,14 +238,19 @@ class MIRIImaging_Observation_Eclipse:
 
         signal_ts = np.ones(total_int)*signal
         np.random.seed(int(perf_counter()))
-        scatter_ts = np.random.normal(0, noise.value, total_int) * u.erg/u.s/u.cm**2/u.AA
-        signal_ts_scatter = signal_ts.value + scatter_ts.value
+        
+        scatter_ts_1obs = np.random.normal(0, noise_1obs.value, total_int) * u.erg/u.s/u.cm**2/u.AA
+        scatter_ts_nobs = np.random.normal(0, noise_nobs.value, total_int) * u.erg/u.s/u.cm**2/u.AA
+
+        signal_ts_scatter_1obs = signal_ts.value + scatter_ts_1obs.value
+        signal_ts_scatter_nobs = signal_ts.value + scatter_ts_nobs.value
         
         # now get some model atmospehres, either from actual models, or from Teq calculations
         self.models = OrderedDict()
         
         if Fp_Fs_from_model:
-            all_spec = get_all_model_spec(self.target)  # this is super specific to the models Joao made for the proposal 
+            all_spec = self.get_all_model_spec(self.target, convolve_model=convolve_model)  # this is super specific to the models Joao made for the proposal 
+
             for model in all_spec.keys():
                 wave = all_spec[model][0]
                 fpfs = all_spec[model][1]
@@ -284,9 +291,9 @@ class MIRIImaging_Observation_Eclipse:
         
         def get_binned_signal(flux):
             bins = 12
-            signal_ts_scatter_binned, time_bin_edges, _ = stats.binned_statistic(time, signal_ts_scatter*flux, 
+            signal_ts_scatter_binned, time_bin_edges, _ = stats.binned_statistic(time, signal_ts_scatter_nobs*flux, 
                                                                                  statistic='mean', bins=bins)
-            npoints_per_bin, _, _                       = stats.binned_statistic(time, signal_ts_scatter*flux, 
+            npoints_per_bin, _, _                       = stats.binned_statistic(time, signal_ts_scatter_nobs*flux, 
                                                                                  statistic='count', bins=bins)
             time_bin_width = np.mean(np.diff(time_bin_edges))
             time_binned = time_bin_edges[:-1] + time_bin_width/2
@@ -302,52 +309,66 @@ class MIRIImaging_Observation_Eclipse:
             figure['FpFs'] = fig.add_subplot(gs[0,2])
 
         # conservative assumption for small eclipse depths -- fine to first order; DOES NOT WORK FOR TRANSITS/HJ ECLIPSES
-        yerr = (1/report['scalar']['sn']) * (1/np.sqrt(nint)) * (1/np.sqrt(nobs)) * np.sqrt(1 + (1/tfrac))
-        self.yerr = yerr
+        yerr_1obs = (1/report['scalar']['sn']) * (1/np.sqrt(nint)) * np.sqrt(1 + (1/tfrac))
+        yerr_nobs = yerr_1obs * (1/np.sqrt(nobs))
+        self.yerr_1obs = yerr_1obs
+        self.yerr_nobs = yerr_nobs
 
-        if Fp_Fs_from_model:
-            # based on Joao's model where the bare rock case is called "noatm"
-            bare_rock_key = [x for x in self.models.keys() if 'alb01' in x]
-            bar_atm_key   = [x for x in self.models.keys() if '10b' in x]
-            
-            cases = np.hstack([bare_rock_key, bar_atm_key])
+        #if Fp_Fs_from_model:
+        #    # based on Joao's model where the bare rock case is called "noatm"
+        #    bare_rock_key = [x for x in self.models.keys() if 'alb01' in x]
+        #    bar_atm_key   = [x for x in self.models.keys() if '10b' in x]
+        #    
+        #    cases = np.hstack([bare_rock_key, bar_atm_key])
 
-        else: cases = np.hstack(list(self.models.keys()))
+        #else: cases = np.hstack(list(self.models.keys()))
+        cases = np.hstack(list(self.models.keys()))
             
         line_styles = ['-', '--', ':']
-        colors = ['C3', 'C0', 'C1', 'C2', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9']
 
         np.random.seed(50)
-        draw_eclipse_depth_measurement = np.random.normal(self.models[f'{measurement_case}_{Albedos[0]}A']['fpfs_band'], yerr, ndraws)
+        if Fp_Fs_from_model==False: measurement_case = f'{measurement_case}_{Albedos[0]}A'
+        
+        draw_eclipse_depth_measurement = np.random.normal(self.models[measurement_case]['fpfs_band'], yerr_nobs, ndraws)
+
         dof = 1  # rough estimate; only 1 data point
         
         for i, case in enumerate(cases):       
             flux = self.get_batman_lightcurve(self.models[case]['fpfs_band'], time)
             time_binned, signal_ts_scatter_binned, npoints_per_bin = get_binned_signal(flux)
             
-            if case==f'{measurement_case}_{Albedos[0]}A': 
+            if case==measurement_case: 
 
-                binned_error = np.sqrt(npoints_per_bin*noise**2) / npoints_per_bin / signal
+                binned_error = np.sqrt(npoints_per_bin*noise_nobs**2) / npoints_per_bin / signal
 
                 if display_figure:
-                    figure['lc'].plot(time, ((signal_ts_scatter*flux/signal).value-1)*1e6 , 
-                                      '.', color='k', alpha=0.3, markeredgecolor='w',
-                                      label=f'Cadence={np.round(cadence, 2)}; ngroups={ngroups}')
+
+                    for n in range(self.nobs):
+                        np.random.seed(int(perf_counter())+n)
+        
+                        scatter_ts_1obs = np.random.normal(0, noise_1obs.value, total_int) * u.erg/u.s/u.cm**2/u.AA
+                        signal_ts_scatter_1obs = signal_ts.value + scatter_ts_1obs.value
+
+                        if n==0: label = f'Cadence={np.round(cadence, 2)}; ngroups={ngroups}'
+                        else: label = None
+                        figure['lc'].plot(time, ((signal_ts_scatter_1obs*flux/signal).value-1)*1e6 , 
+                                          '.', color='k', alpha=0.3, markeredgecolor='w',
+                                          label=label)
                     
                     figure['lc'].errorbar(time_binned, ((signal_ts_scatter_binned/signal).value -1)*1e6, 
                                       yerr=binned_error*1e6, fmt='o', color='k', alpha=1)
                     
                     # only plot error bar for bare rock case in Fp/Fs figure
-                    figure['FpFs'].errorbar(self.models[case]['wave_band'].value, self.models[case]['fpfs_band'] *1e6, yerr=yerr.value *1e6, fmt='.', color='k', alpha=0.8, zorder=1000)
-                if self.verbose: print('Data point:', self.models[case]['fpfs_band']*1e6, '+/-', yerr*1e6, 'ppm')
+                    figure['FpFs'].errorbar(self.models[case]['wave_band'].value, self.models[case]['fpfs_band'] *1e6, yerr=yerr_nobs.value *1e6, fmt='.', color='k', alpha=0.8, zorder=1000)
+                if self.verbose: print('Data point:', self.models[case]['fpfs_band']*1e6, '+/-', yerr_nobs*1e6, 'ppm')
 
             if display_figure: figure['lc'].plot(time, ((signal_ts*flux/signal).value-1)*1e6, 
-                                                ls=line_styles[i%3], lw=3, color=colors[i], label=case)
+                                                ls=line_styles[i%3], lw=3, color=f'C{i%10}', label=case)
             
         for i, model in enumerate(self.models):
             if self.verbose: print(model)
             
-            chisq = self.calc_chi_sq(self.models[model]['fpfs_band'], draw_eclipse_depth_measurement, yerr) / ndraws # can do this trick since only 1 data point
+            chisq = self.calc_chi_sq(self.models[model]['fpfs_band'], draw_eclipse_depth_measurement, yerr_nobs) / ndraws # can do this trick since only 1 data point
             if self.verbose: print('    chisq_red', chisq)
             sigma = self.calc_significance(chisq, dof)
             if self.verbose: print('    sigma', sigma)
@@ -356,8 +377,8 @@ class MIRIImaging_Observation_Eclipse:
             self.models[model]['sigma'] = sigma
             
             if display_figure:
-                figure['FpFs'].plot(self.models[model]['wave'], self.models[model]['fpfs'] *1e6, lw=3, color=colors[i%10], label=model+f', {sigma:.2f}$\sigma$')
-                figure['FpFs'].plot(self.models[model]['wave_band'].value, self.models[model]['fpfs_band']*1e6, 's', color=colors[i%10])
+                figure['FpFs'].plot(self.models[model]['wave'], self.models[model]['fpfs'] *1e6, lw=3, color=f'C{i%10}', label=model+f', {sigma:.2f}$\sigma$')
+                figure['FpFs'].plot(self.models[model]['wave_band'].value, self.models[model]['fpfs_band']*1e6, 's', color=f'C{i%10}')
 
             # compare bare rock case to atmosphere case
         
@@ -375,7 +396,7 @@ class MIRIImaging_Observation_Eclipse:
             figure['lc'].set_ylabel('Normalized Flux (ppm)', fontsize=14)
 
             figure['lc'].grid(alpha=0.4)
-            figure['lc'].set_ylim(-0.2*np.std(((signal_ts_scatter*flux/signal).value-1)*1e6), 0.5*np.std((signal_ts_scatter*flux/signal).value-1)*1e6)
+            figure['lc'].set_ylim(-0.4*np.std(((signal_ts_scatter_1obs*flux/signal).value-1)*1e6), 1.5*np.std((signal_ts_scatter_1obs*flux/signal).value-1)*1e6)
             
             figure['FpFs'].legend(loc='upper left')
             figure['FpFs'].set_ylabel('$F_p$/$F_s$ (ppm)', fontsize=14)
@@ -684,7 +705,7 @@ class MIRIImaging_Observation_Eclipse:
         '''
         return np.degrees(np.arccos(b*(1./a_Rs)))
 
-    def get_all_model_spec(targ):
+    def get_all_model_spec_joao(targ):
         plnt_name = targ['pl_name'].replace(" ", "").replace("-", "")
         print(targ['pl_name'], '-->', plnt_name)
         
@@ -699,6 +720,31 @@ class MIRIImaging_Observation_Eclipse:
             wave = model['col2']
             Fp_Fs = model['col7']
             all_spec[specfile] = [wave, Fp_Fs]
+            
+        return all_spec
+
+    def get_all_model_spec(self, targ, convolve_model=False):
+        plnt_name = targ['pl_name'].replace(" ", "").replace("-", "")
+        print(targ['pl_name'], '-->', plnt_name)
+        
+        modelspecpath = f'./models/{plnt_name.lower()}/'
+        speclist = np.sort(os.listdir(modelspecpath))
+        
+        all_spec = {}
+        for specfile in speclist:
+            model = ascii.read(modelspecpath + specfile, data_start=3)
+        
+            wave = model['col2']
+            Fp_Fs = model['col7']
+
+            if convolve_model!=False:
+                g = Gaussian1DKernel(stddev=convolve_model)
+                z = convolve(Fp_Fs, g)
+                Fp_Fs = z
+
+            spec_name = specfile.split(".")[0]
+
+            all_spec[spec_name] = [wave, Fp_Fs]
             
         return all_spec
         
