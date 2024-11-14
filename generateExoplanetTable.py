@@ -3,6 +3,7 @@ from astropy.io import ascii
 import requests
 import json
 
+
 def generateTransitingExoTable(sy_dist_upper=25, st_rad_upper=0.59, st_mass_upper=0.58, pl_rade_upper=1.85, pl_per_upper=30, outputpath="."):
     """
     This code will generate a table of transiting planets from the NASA Exoplanet Archive.
