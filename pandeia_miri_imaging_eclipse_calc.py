@@ -4,7 +4,7 @@ import matplotlib.gridspec as gridspec
 import astropy.units as u
 import astropy.constants as const
 from astropy.io import ascii, fits
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord, EarthLocation
 from astropy.table import Table
 from astropy.modeling.models import BlackBody
 from scipy import stats, interpolate
@@ -22,6 +22,7 @@ from pandeia.engine.calc_utils import build_default_calc
 from pandeia.engine.perform_calculation import perform_calculation
 from time import perf_counter
 from astropy.convolution import Gaussian1DKernel, convolve
+from astropy.time import Time
 
 
 import warnings
@@ -735,7 +736,7 @@ class MIRIImaging_Observation_Eclipse:
             model = ascii.read(modelspecpath + specfile, data_start=3)
         
             wave = model['col2']
-            Fp_Fs = model['col7']
+            Fp_Fs = model[model.colnames[-1]]
 
             if convolve_model!=False:
                 g = Gaussian1DKernel(stddev=convolve_model)
@@ -772,3 +773,138 @@ class MIRIImaging_Observation_Eclipse:
         # this is a way of doing it without any 1 - *really tiny number* such that you don't get a result of inf. 
         # this website has some figures that helped me figure this out: http://work.thaslwanter.at/Stats/html/statsDistributions.html
         return stats.norm.isf((stats.chi2.sf(chisq, dof))/2.)
+
+    def calc_APT_phase(self, obs_type='occ', Tfrac=1, Textra=0*u.hr, gamble_time=0):
+        # if gamble: we will but 15 minutes of the 1 hour charge time *after* the event
+        # the scheduler seems to always start the observations as early as possible so this will even out the baseline
+        # however the scheduler makes no guarantees, so this is a gamle ;)
+        # Tfraf =  fraction of time of out-of-event/in-event; e.g., for equal OOT to in-transit, tfrac=1
+        # Textra = add some extra time to be added to the baseline in equal amounts on either side of the event
+        
+        # EDIT THE FOLLOWING PARAMETERS AS NECESSARY
+        
+        print(self.target['pl_name'])
+        #tdur = orb.Tdur(P=self.target['pl_orbper']*u.day, 
+        #        Rp_Rs=((self.target['pl_rade']*u.R_earth)/(self.target['st_rad']*u.R_sun)).decompose().value,
+        #        a_Rs = ((self.target['pl_orbsmax']*u.AU)/(self.target['st_rad']*u.R_sun)).decompose().value,
+        #        i = self.target['pl_orbincl']
+        #       ) # event duration
+
+
+        # if transit duration < 1 hour, automatically add a little baseline to bring it up to 1 hr; 
+        # COMMMENT OUT IF YOU DO NOT WANT THIS FEATURE
+        #if tdur.to(u.min).value < 60:
+        #    Tfrac = ((1*u.hr)/(tdur.to(u.hr))).decompose()
+        #    print(f'   padding baseline for shorter transit/ Tfrac={Tfrac}')
+        #per_thresh1, ecc_thresh1 = 3, 0.05
+        #per_thresh2, ecc_thresh2 = 2, 0.05
+        #if self.target['pl_orbper'] > per_thresh1 and self.target['pl_orbeccen'] >= ecc_thresh1:
+            # worst case scenario
+        #    Tfrac = 1.2
+        #    print(f'   padding baseline for orbital period >{per_thresh1} days and ecc >= {ecc_thresh1}/ Tfrac={Tfrac}')
+        #elif self.target['pl_orbper'] > per_thresh2 and self.target['pl_orbeccen'] >= ecc_thresh2:
+        #    Tfrac = 1.0
+        #    print(f'   padding baseline for orbital period >{per_thresh2} days and ecc >= {ecc_thresh2}/ Tfrac={Tfrac}')
+        #if self.target['pl_orbeccen'] >= 0.1:
+        #    Tfrac = 1.5
+        #    print(f'   padding baseline for large or uncertain ecc/ Tfrac={Tfrac}')
+        # Dwell time of the detector in minutes, in case there is a weird ramp like with HST
+        Tdwell = 30 * u.min   # 30 minutes recommended for MIRI
+        # charge yourself an hour of time since you'll get charged this anyway if your window is too small (<1 hr)
+        Tcharge = 1.000001 * u.hr
+        # extra time you might want... perhaps to ensure you catch a secondary eclipse or whatever
+        if Textra.value > 0: print(f'   Adding {Textra} to pad baseline')
+        
+        # T_14 in hours
+        Tdur = self.tdur.to(u.hr)              # [hr]
+        # Period in days
+        P = self.target['pl_orbper'] * u.day
+        # T0; this is a time of mid-transit when phase=0 (does not have to be for a specific transit)
+        T0 = self.target['pl_tranmid']                # BJD-TDB
+        # as a string, the RA and Dec of the host star, e.g., RA_Dec= '17:15:18.92 +04:57:50.1'
+        RA_Dec = sys_coords = self.target['rastr']+' '+self.target['decstr']
+        # do you want to observe a transit or an occultation (secondary eclsipse)
+
+        #############################################################################################################
+        ######### magical code; please don't touch ##################################################################
+        #############################################################################################################
+
+        #baseline = np.maximum((Tfrac*Tdur).to(u.hr).value, (Tdur/2).to(u.hr).value) * u.hr  # suggested pre- and post-eclipse baseline; you can tweak this if you really want
+        baseline = (Tfrac*Tdur).to(u.hr) + Textra # total time out of transit/eclipse
+
+        if   obs_type == 'tra': phase_midpoint = 0.0
+        elif obs_type == 'occ': phase_midpoint = 0.5
+
+        obs_start = Tdur/2 + baseline/2  # time before the event mid-point to start observing
+
+        phase_max = phase_midpoint - (obs_start/P).decompose() - (Tdwell/P).decompose()
+        phase_min = phase_max - (Tcharge/P).decompose()
+
+        if gamble_time != 0: # gamble time in minutes
+            print(f'   Gambling to take {gamble_time} mins before the event and stick it after (becuase observing windows seem to start on time)')
+            phase_max += (gamble_time*u.min/P).decompose()
+            phase_min += (gamble_time*u.min/P).decompose()
+
+        # code shamelessly stolen from: https://gist.github.com/StuartLittlefair/4ab7bb8cf21862e250be8cb25f72bb7a
+        # converts bjd_tdb to heliocentric times; need this for JWST APT
+        def bary_to_helio(star, bjd, obs_name):
+            bary = Time(bjd, scale='tdb', format='jd')
+            obs = EarthLocation.of_site(obs_name)
+            #star = SkyCoord(coords, unit=(u.hour, u.deg))
+            ltt = bary.light_travel_time(star, 'barycentric', location=obs) 
+            guess = bary - ltt
+            delta = (guess + guess.light_travel_time(star, 'barycentric', obs)).jd  - bary.jd
+            guess -= delta * u.d
+
+            ltt = guess.light_travel_time(star, 'heliocentric', obs)
+            return guess.utc + ltt
+
+        phase0 = Time(T0, format='jd', scale='tdb')
+        star = SkyCoord(RA_Dec, unit=(u.hourangle, u.deg))
+        random_earth_place_name = 'lco'
+
+        phase0_hjd = bary_to_helio(star, phase0, random_earth_place_name)
+
+        print('   ****** PHASE *******')
+        print('   Phase range {} to {}'.format(phase_min, phase_max))
+        print('   Period {}'.format(P))
+        print('   Zero phase (HJD) {}'.format(phase0_hjd))
+        print('')
+
+
+        self.total_time = (Tdwell + baseline + Tdur + Tcharge).to(u.hr)
+
+        print('   *** ESTIMATED TOTAL TIME ***')
+        print('   NOTE: This does not go into the APT, it is just an estimate')
+        print('   Event duration {}'.format(Tdur.to(u.min)))
+        print('   Event duration {}'.format(Tdur.to(u.hr)))
+        print('   TOTAL TIME PER OBSERVATION: {}'.format(self.total_time))
+        print('')
+        
+        
+        return self.total_time
+
+    def calc_integrations_per_exposure(self):
+
+        if   self.subarray.lower()=='full':      tframe = 2.77504 * u.s
+        elif self.subarray.lower()=='brightsky': tframe = 0.86528 * u.s
+        elif self.subarray.lower()=='sub256':    tframe = 0.29952 * u.s
+        elif self.subarray.lower()=='sub128':    tframe = 0.11904 * u.s
+        elif self.subarray.lower()=='sub64':     tframe = 0.08500 * u.s
+        else: 
+            print('ERROR: subarray not recognized')
+            return
+
+        print(f'Frame time for {self.subarray} subarray: {tframe} s')
+        
+        tint    = tframe * self.ngroups                         # amount of time per integration
+        treset  = 1*tframe                                # reset time between each integration
+        cadence = tint + treset
+        
+        nintegrations = int(np.ceil((self.total_time/cadence).decompose()))
+        print('    ***** FORM EDITOR ******')
+        print(f'   subarray = {self.subarray}')
+        print(f'   Ngroups {self.ngroups}')
+        print(f'   Integrations/exposer {nintegrations}')
+        
+        return nintegrations
