@@ -12,25 +12,31 @@ from astropy.coordinates import SkyCoord
 #c = SkyCoord('22:41:58.1173365142 -69:10:08.320922853', unit=(u.hourangle, u.deg), frame='icrs') # LHS 3844
 #c = SkyCoord('03:01:51.39 -16:35:36.1', unit=(u.hourangle, u.deg), frame='icrs') # LTT 1445A  #ep=2000 (Winters)
 #c = SkyCoord('03:01:51.04 -16:35:31.0', unit=(u.hourangle, u.deg), frame='icrs') # LTT 1445 BC ep=2000 (Winters; Henry+ (2018))
+c = SkyCoord('03:01:50.98 -16:35:40.32', unit=(u.hourangle, u.deg), frame='icrs') # LTT 1445A ep=2016 (Gaia Dr3)
+mu_ra = 0.36997184335074684 # pmra [as/yr]
+mu_dec = -0.267931311928784 # pmdec [as/yr]
+d = 6.863785972580628 # distance [pc]
+t = 10 # elapsed time since reference epoch [yr]
+v_r = 0 # radial velocity [km/s]
 #c = SkyCoord('18:57:39.34 +53:30:33.3', unit=(u.hourangle, u.deg), frame='icrs') # WD 1856+354
 #c = SkyCoord('18:57:37.911 +53:31:12.92', unit=(u.hourangle, u.deg), frame='icrs') # M dwarf near WD 1856+354
-c = SkyCoord('12:47:55.53 09:44:57.68', unit=(u.hourangle, u.deg), frame='icrs') # GJ 486 ep=2016 (Gaia EDR3)
+#c = SkyCoord('12:47:55.53 09:44:57.68', unit=(u.hourangle, u.deg), frame='icrs') # GJ 486 ep=2016 (Gaia EDR3)
 #c = SkyCoord('12:47:55.57 09:44:57.91', unit=(u.hourangle, u.deg), frame='icrs') # GJ 486 ep=2015.5 (Gaia DR2)
 #c = SkyCoord('12:47:59.18 09:40:07.74', unit=(u.hourangle, u.deg), frame='icrs') # GJ 486 comparison star ep=2016 (Gaia EDR3) 
+#mu_ra = -1.008267   # proper motion ra [as/yr]
+#mu_dec = -0.460034  # proper motion dec [as/yr]
+#d = 8.079134       # distance [pc]
+#t = 6.16         # elapsed time since position was measured [yrs]
+#v_r = 0          # radial velocity [km/s]
 
 ra = c.ra.deg       # [deg]
 dec = c.dec.deg     # [deg]
-mu_ra = -1.008267   # proper motion ra [as/yr]
-mu_dec = -0.460034  # proper motion dec [as/yr]
-d = 8.079134       # distance [pc]
-t = 6.16         # elapsed time since position was measured [yrs]
-v_r = 0          # radial velocity [km/s]
 
 # convert to transverse (linear) velocities
 v_ra = mu_ra * d * 4.74         #[km/s]
 v_dec = mu_dec * d * 4.74       #[km/s]
 
-# convert ra and dec into radiansASTRO
+# convert ra and dec into radians
 ra = ra*np.pi/180
 dec = dec*np.pi/180
 
