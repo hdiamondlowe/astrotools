@@ -13,7 +13,7 @@ from astropy.coordinates import SkyCoord
 #c = SkyCoord('03:01:51.39 -16:35:36.1', unit=(u.hourangle, u.deg), frame='icrs') # LTT 1445A  #ep=2000 (Winters)
 #c = SkyCoord('03:01:51.04 -16:35:31.0', unit=(u.hourangle, u.deg), frame='icrs') # LTT 1445 BC ep=2000 (Winters; Henry+ (2018))
 c = SkyCoord('03:01:50.98 -16:35:40.32', unit=(u.hourangle, u.deg), frame='icrs') # LTT 1445A ep=2016 (Gaia Dr3)
-mu_ra = 0.36997184335074684 # pmra [as/yr]
+mu_ra = -0.36997184335074684 # pmra [as/yr]
 mu_dec = -0.267931311928784 # pmdec [as/yr]
 d = 6.863785972580628 # distance [pc]
 t = 10 # elapsed time since reference epoch [yr]

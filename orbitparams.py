@@ -57,7 +57,26 @@ def Tdur(P, Rp_Rs, a_Rs, b=None, i=None):
 
     value = np.sqrt((1 + Rp_Rs)**2 - b**2) / a_Rs / np.sin(i)
     return P/np.pi * np.arcsin(value)
+
+def Tdur_NEA(targ):
+    '''
+    Calculate transit (or eclipse) duration from dictionary formatted like NASA Exoplanet Archive
+    '''
+    if targ['pl_ratror'] == None:
+        print("Calculating Rp/Rs from separate Rp and Rs")
+        Rp_Rs = ((targ['pl_rade']*u.R_earth)/(targ['st_rad']*u.R_sun)).decompose().value
+    else: Rp_Rs = targ['pl_ratror']
+    if targ['pl_ratdor'] == 0.0:
+        print("Calculating a/Rs from separate a and Rs")
+        a_Rs = ((targ['pl_orbsmax']*u.AU)/(targ['st_rad']*u.R_sun)).decompose().value
+    else: a_Rs = targ['pl_ratdor']
+    tdur = Tdur(P=targ['pl_orbper']*u.day, 
+                Rp_Rs=Rp_Rs,
+                a_Rs=a_Rs,
+                i = targ['pl_orbincl']
+                ) # event duration
     
+    return tdur
 
 def T23(P, Rp_Rs, a_Rs, b,  i=None):
     '''
@@ -91,8 +110,6 @@ def Tdur_ecc(P, Rp_Rs, a_Rs, e, w, b=None, i=None):
     '''
 
     assert b != None or i != None
-
-
 
     if i==None: i = np.radians(inc(a_Rs, b))
     elif b == None: 

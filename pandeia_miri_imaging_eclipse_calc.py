@@ -24,7 +24,6 @@ from time import perf_counter
 from astropy.convolution import Gaussian1DKernel, convolve
 from astropy.time import Time
 
-
 import warnings
 warnings.filterwarnings('ignore')
 
