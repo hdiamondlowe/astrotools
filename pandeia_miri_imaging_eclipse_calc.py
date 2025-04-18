@@ -41,8 +41,9 @@ miri_arrays_descending = ['full', 'brightsky', 'sub256', 'sub128', 'sub64']
 class MIRIImaging_Observation_Eclipse:
     def __init__(self, target, filter="f1500w", subarray="sub256", nobs=1,
                  frac_fullwell=0.65, tfrac=1,
+                 ngroups=False, ngroups_remove=0,
                  find_best_subarray=False,
-                 stellar_spec='default', input_spec=None,
+                 stellar_spec='default', input_spec=None, save_spec=False,
                  verbose=True):
         self.target = target
         self.filter = filter
@@ -50,27 +51,51 @@ class MIRIImaging_Observation_Eclipse:
         self.nobs = nobs
         self.frac_fullwell = frac_fullwell
         self.tfrac = tfrac
+        self.ngroups = ngroups
+        self.ngroups_remove = ngroups_remove
         self.find_best_subarray = find_best_subarray
         self.stellar_spec = stellar_spec
         self.input_spec = input_spec
+        self.save_spec = save_spec
         self.verbose = verbose
+
+        assert not (self.find_best_subarray and self.ngroups), 'You cannot assign the number of groups AND find the best subarray. Either one or the other please.'
+        if self.ngroups != False: self.ngroups = int(self.ngroups)
 
         # Initialize other attributes
         self.timing = {}
         self.miri_imaging_ts = {}
         self.miri_imaging_ts_calibration = {}
 
+        # an estimate of the transit duration is key throughout but requires a lot of parameters
+        # if you have these parameters, great, but if you'd like to use your own transit duration
+        # (like maybe if this is for an eclispe and the eclispe duration is different than the transit duration)
+        # you can do that too if you ad the keyword "pl_tdur"
+        #try: self.tdur = self.target['pl_tdur'] * u.day
+        #except(KeyError):
 
-        if self.target['pl_ratror'] == None:
-            print("Calculating Rp/Rs from separate Rp and Rs")
-            self.target['pl_ratror'] = ((self.target['pl_rade']*u.R_earth)/(self.target['st_rad']*u.R_sun)).decompose().value
-        if self.target['pl_ratdor'] == 0.0:
-            print("Calculating a/Rs from separate a and Rs")
-            self.target['pl_ratdor'] = ((self.target['pl_orbsmax']*u.AU)/(self.target['st_rad']*u.R_sun)).decompose().value
-        if self.target['pl_orbincl'] == 0.0 or np.isnan(self.target['pl_orbincl']):
-            print("Calculating inclination from impact parameter")
-            self.target['pl_orbincl'] = self.inc(self.target['pl_ratdor'], self.target['pl_imppar'])
+        try: self.tdur = self.target['pl_tdur'] * u.day
+        except(KeyError):
 
+            if self.target['pl_ratror'] == None:
+                print("Calculating Rp/Rs from separate Rp and Rs")
+                self.target['pl_ratror'] = ((self.target['pl_rade']*u.R_earth)/(self.target['st_rad']*u.R_sun)).decompose().value
+            if self.target['pl_ratdor'] == 0.0:
+                print("Calculating a/Rs from separate a and Rs")
+                self.target['pl_ratdor'] = ((self.target['pl_orbsmax']*u.AU)/(self.target['st_rad']*u.R_sun)).decompose().value
+            if self.target['pl_imppar'] == 0.0 or np.isnan(self.target['pl_imppar']):
+                print("Calculating impact parameter from inclination")
+                self.target['pl_imppar'] = self.impact(self.target['pl_ratdor'], self.target['pl_orbincl'])
+            if self.target['pl_orbincl'] == 0.0 or np.isnan(self.target['pl_orbincl']):
+                print("Calculating inclination from impact parameter")
+                self.target['pl_orbincl'] = self.inc(self.target['pl_ratdor'], self.target['pl_imppar'])
+
+            # need eclipse duration
+            self.tdur = self.calc_Tdur() # event duration
+            if np.isnan(self.tdur): 
+                print("ERROR: duration cannot be nan")
+
+        if self.verbose: print("Transit duration:", self.tdur)
         
 
     def get_target_timing(self):
@@ -86,14 +111,6 @@ class MIRIImaging_Observation_Eclipse:
         # star_params
         star_name = self.target['hostname']
         k_mag = self.target['sy_kmag']
-
-        # need eclipse duration
-        try:
-            self.target['pl_ratror'].value
-        except(AttributeError):
-            self.target['pl_ratror'] = ((self.target['pl_rade']*u.R_earth)/(self.target['st_rad']*u.R_sun)).decompose().value
-
-        self.tdur = self.calc_Tdur() # event duration
 
         # obs params specific to MIRI imaging
         tsettle = 30 * u.min    # detector settling time
@@ -111,8 +128,13 @@ class MIRIImaging_Observation_Eclipse:
             flux *= wave**2 / const.c
 
             self.input_spec = np.array([wave.to(u.um).value, flux.to(u.mJy).value])
+            if self.save_spec: ascii.write(self.input_spec.T, f"{self.target['hostname']}_pysynphot_PHOENIX_spec.dat", overwrite=True)
         
-        if self.find_best_subarray:
+        if self.ngroups != False:
+            print('You are setting the number of groups. The full well fraction is ignored.')
+            miri_imaging_ts = self.make_miri_dict(self.subarray, scene_spec='input', input_spec=self.input_spec)
+            
+        elif self.find_best_subarray:
             for subarray in miri_arrays_descending:     
                 # make the pandeia dictionary for miri
                 if self.verbose: print(f'Testing subarray {subarray}')
@@ -132,18 +154,20 @@ class MIRIImaging_Observation_Eclipse:
             report = perform_calculation(miri_imaging_ts)
             print('ngroups before for saturation:', report['scalar']['sat_ngroups'])
             ngroups = int(report['scalar']['sat_ngroups']*self.frac_fullwell)  # use as many groups as possible without saturating, times the fraction of the full well depth
-            
-        if ngroups > 300: ngroups = 300        # ngroups > 300 not recommended due to cosmic rays
-        elif ngroups>=5 and ngroups<=10: 
-            print('ngroup is in the 5-10 range --> adding 1 group')
-            ngroups+=1
-        elif ngroups < mingroups:
-            print('WARNING: THIS IS TOO FEW GROUPS!')
-        elif ngroups < 20:
-            print(f'WARNING: ngroups is {ngroups}, less than recommended ~20')
         
-        self.ngroups = ngroups
-        miri_imaging_ts['configuration']['detector']['ngroup'] = self.ngroups
+        if self.ngroups == False:
+            if ngroups > 300: ngroups = 300        # ngroups > 300 not recommended due to cosmic rays
+            elif ngroups>=5 and ngroups<=10: 
+                print('ngroup is in the 5-10 range --> adding 1 group')
+                ngroups+=1
+            elif ngroups < mingroups:
+                print('WARNING: THIS IS TOO FEW GROUPS!')
+            elif ngroups < 20:
+                print(f'WARNING: ngroups is {ngroups}, less than recommended ~20')
+           
+            self.ngroups = ngroups
+
+        miri_imaging_ts['configuration']['detector']['ngroup'] = self.ngroups - self.ngroups_remove
         report = perform_calculation(miri_imaging_ts)
 
         if self.verbose:
@@ -151,19 +175,21 @@ class MIRIImaging_Observation_Eclipse:
             print(report['warnings']) # should be empty if nothing is wrong
         
         tframe  = report['information']['exposure_specification']['tframe'] * u.s
-        tint    = tframe * self.ngroups                         # amount of time per integration
-        treset  = 1*tframe                                # reset time between each integration
+        tint    = tframe * (self.ngroups - self.ngroups_remove)  # amount of time per integration
+        treset  = (1+self.ngroups_remove) * tframe                                       # reset time between each integration
         cadence = tint + treset
-        nint    = (self.tdur/(tint + treset)).decompose()      # number of in-transit integrations
+        nint    = (self.tdur/(tint + treset)).decompose()        # number of in-transit integrations
         ref_wave = report['scalar']['reference_wavelength']                         * u.micron
         
         if self.verbose: 
             print('Timing for each observation')
-            print('    Number of groups per integration (ngroups)', ngroups)
+            print('    Number of groups per integration (ngroups)', self.ngroups)
+            print('    Number of groups removed ', self.ngroups_remove)
             print('    Time to take one frame (tframe)', tframe)
             print('    Time per single integration (tframe*ngroup):', tint)
             print('    Cadence (integration time plus reset):', cadence)
             print('    Number of in-occultation integrations:', nint.decompose())
+            print('    Fraction of baseline to in-occultation observing time:', self.tfrac)
             print('    Observing efficiency (%):', (tint/cadence).decompose()*100)
 
         self.timing['tdur']     = self.tdur
@@ -174,7 +200,7 @@ class MIRIImaging_Observation_Eclipse:
         self.timing['treset']   = treset
         self.timing['cadence']  = cadence
         self.timing['nint']     = nint
-        self.timing['ngroups']  = ngroups
+        self.timing['ngroups']  = self.ngroups
         self.timing['ref_wave'] = ref_wave
         self.timing['report']   = report
         self.timing['miri_imaging_ts'] = miri_imaging_ts
@@ -225,6 +251,7 @@ class MIRIImaging_Observation_Eclipse:
 
         if self.verbose: 
             print('Single integration info')
+            print('    Signal +/- Noise =', extracted_flux, '+/-', extracted_noise)
             print('    Signal +/- Noise =', signal, '+/-', noise_1obs)
             print('    Fractional uncertainty,', noise_1obs/signal)
             print('    SNR', snr)
@@ -452,6 +479,11 @@ class MIRIImaging_Observation_Eclipse:
             ndays = bg.bkg_data['calendar'].size
             assert ndays > 0  # make sure object is visible at some point in the year; if not check coords
             middleday = bg.bkg_data['calendar'][int(ndays / 2)] # picking the middle visible date; somewhat arbitrary!
+            if middleday > 365:
+                print("It looks like you've picked a day outside the usual background set of 365 days.")
+                print("Just going to nudge that back to 365")
+                middleday = 365
+
             middleday_indx = np.argwhere(bg.bkg_data['calendar'] == middleday)[0][0]
 
             tot_bkg = bg.bkg_data['total_bg'][middleday_indx]
@@ -563,8 +595,8 @@ class MIRIImaging_Observation_Eclipse:
         miri_imaging_ts['background'] = self.get_bkg(ref_wave)
         miri_imaging_ts['background_level'] = 'high' # let's keep it conservative
 
-        miri_imaging_ts['strategy']['aperture_size']  = 0.55            # values from Greene+ 2023 for T1-b
-        miri_imaging_ts['strategy']['sky_annulus']    = [1.32, 2.8]     # assuming MIRI plate scale of 0.11"/pix
+        miri_imaging_ts['strategy']['aperture_size']  = 0.6259            # values from Gordon+ 2025
+        miri_imaging_ts['strategy']['sky_annulus']    = [0.949, 1.259]       # assuming MIRI plate scale of 0.11"/pix
 
         if self.verbose: print('Returning MIRI dictionary')
         return miri_imaging_ts
@@ -640,11 +672,14 @@ class MIRIImaging_Observation_Eclipse:
             print("Calculating a/Rs from separate a and Rs")
             a_Rs = ((self.target['pl_orbsmax']*u.AU)/(self.target['st_rad']*u.R_sun)).decompose().value
         else: a_Rs  = self.target['pl_ratdor']
+        if self.target['pl_imppar'] == None:
+            b = a_Rs * np.cos(i)
+        else: b = self.target['pl_imppar']
 
         i = np.radians(i)
-        b = a_Rs * np.cos(i)
 
         value = np.sqrt((1 + Rp_Rs)**2 - b**2) / a_Rs / np.sin(i)
+
         return P/np.pi * np.arcsin(value)
         
     def calc_FpFs(self, T_p, wavelength, input_spec=[]):
@@ -704,6 +739,14 @@ class MIRIImaging_Observation_Eclipse:
         returns: inclination i [degrees]
         '''
         return np.degrees(np.arccos(b*(1./a_Rs)))
+
+    def impact(self, a_Rs, i):
+        '''
+        takes: scaled orbital distance a_Rs []
+            inclination i [degrees]
+        returns: imact parameter b []
+        '''
+        return a_Rs * np.cos(np.radians(i))
 
     def get_all_model_spec_joao(targ):
         plnt_name = targ['pl_name'].replace(" ", "").replace("-", "")
