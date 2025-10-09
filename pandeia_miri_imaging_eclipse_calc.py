@@ -7,6 +7,10 @@ from astropy.io import ascii, fits
 from astropy.coordinates import SkyCoord, EarthLocation
 from astropy.table import Table
 from astropy.modeling.models import BlackBody
+from astropy.convolution import Gaussian1DKernel, convolve
+from astropy.time import Time
+from specutils import Spectrum1D
+from specutils.manipulation import FluxConservingResampler
 from scipy import stats, interpolate
 import pysynphot
 import pickle
@@ -16,13 +20,13 @@ import os
 import glob
 from collections import OrderedDict
 import batman
+
 from jwst_backgrounds import jbt
 import pandeia.engine
 from pandeia.engine.calc_utils import build_default_calc
 from pandeia.engine.perform_calculation import perform_calculation
 from time import perf_counter
-from astropy.convolution import Gaussian1DKernel, convolve
-from astropy.time import Time
+
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -31,7 +35,7 @@ print("Pandeia engine versions:", pandeia.engine.pandeia_version())
 
 '''
 This class is to help make some basic S/N calculations for observing secondary eclipse with MIRI Imaging TSO.
-It shoudl keep working with updated versions of pandeia
+It should keep working with updated versions of pandeia
 This was adapted from a much messier code and could use some clean-up, but it's fine for now.
 --- H. Diamond-Lowe 18-07-2024
 '''
@@ -39,6 +43,61 @@ This was adapted from a much messier code and could use some clean-up, but it's 
 miri_arrays_descending = ['full', 'brightsky', 'sub256', 'sub128', 'sub64']
 
 class MIRIImaging_Observation_Eclipse:
+    """A class to handle MIRI imaging eclipse observations for JWST.
+    
+    This class sets up and calculates the parameters needed for MIRI imaging time-series
+    observations, particularly for exoplanet eclipse observations. It handles detector
+    settings, timing calculations, and spectral inputs.
+    
+    Parameters
+    ----------
+    target : dict
+        Dictionary containing target star and planet parameters including:
+        - hostname: Name of the host star
+        - sy_kmag: K-band magnitude
+        - st_teff: Effective temperature
+        - st_logg: Surface gravity
+        - pl_tdur: Transit/eclipse duration (optional)
+        - Other orbital parameters if pl_tdur is not provided
+    filter : str, optional
+        MIRI filter to use, default is "f1500w"
+    subarray : str, optional
+        Detector subarray size, default is "sub256"
+    nobs : int, optional
+        Number of observations to perform, default is 1
+    frac_fullwell : float, optional
+        Fraction of the detector full well to use, default is 0.65
+    tfrac : float, optional
+        Fraction of transit duration to observe, default is 1
+    ngroups : int or False, optional
+        Number of groups per integration, default is False (auto-calculated)
+    ngroups_remove : int, optional
+        Number of groups to remove from each integration, default is 0
+    find_best_subarray : bool, optional
+        Whether to automatically find the best subarray size, default is False
+    stellar_spec : str, optional
+        Type of stellar spectrum to use:
+        - 'default': Uses pysynphot to create PHOENIX spectrum based on star parameters
+        - 'input': Uses provided input_spec array
+    input_spec : array-like, optional
+        Custom input spectrum if stellar_spec='input'. Must be a numpy array with shape (2, N) where:
+        - First row [0,:] contains wavelength values in microns (μm)
+        - Second row [1,:] contains flux values in milliJansky (mJy)
+        Can be created using np.array([wavelength_array, flux_array]). (Remove units if arrays have them)
+        The wavelength range must cover the chosen filter's bandpass.
+        Note: The flux will be internally converted to units of erg/s/cm²/Å/sr for calculations
+    save_spec : bool, optional
+        Whether to save the generated spectrum to file, default is False
+    verbose : bool, optional
+        Whether to print detailed information during calculations, default is True
+    
+    Notes
+    -----
+    - The class automatically calculates transit duration if not provided
+    - Either ngroups or find_best_subarray should be specified, not both
+    - The detector parameters are optimized to avoid saturation while maximizing SNR
+    """
+    
     def __init__(self, target, filter="f1500w", subarray="sub256", nobs=1,
                  frac_fullwell=0.65, tfrac=1,
                  ngroups=False, ngroups_remove=0,
@@ -99,10 +158,36 @@ class MIRIImaging_Observation_Eclipse:
         
 
     def get_target_timing(self):
-        '''
-        stellar_spec --- 'default' --> will use pysynphot to make a PHOENIX spctrum
-                         'input'   --> will use input_spec
-        '''
+        """
+        Calculates and returns timing and configuration parameters for a MIRI imaging eclipse observation.
+        This method determines the optimal number of detector groups, integration times, cadence, and other 
+        relevant parameters for a JWST MIRI imaging time-series observation of an exoplanet eclipse. It uses 
+        target and observation parameters, performs ETC calculations, and updates the object's timing dictionary.
+        Returns
+        -------
+        dict
+            Dictionary containing timing and configuration parameters for the observation, including:
+            - 'tdur': Total duration of the eclipse event.
+            - 'nobs': Number of observations.
+            - 'tfrac': Fraction of baseline to in-occultation observing time.
+            - 'tframe': Time to take one frame.
+            - 'tint': Time per single integration.
+            - 'treset': Reset time between each integration.
+            - 'cadence': Total time per integration (integration + reset).
+            - 'nint': Number of in-occultation integrations.
+            - 'ngroups': Number of groups per integration.
+            - 'ngroups_sat': Number of groups before saturation.
+            - 'ref_wave': Reference wavelength for the observation.
+            - 'report': ETC calculation report.
+            - 'miri_imaging_ts': Pandeia configuration dictionary for the observation.
+        Notes
+        -----
+        - If `self.ngroups` is set, the full well fraction is ignored.
+        - If `self.find_best_subarray` is True, the method searches for the smallest subarray that results in >20 groups, 
+          with a preference for larger subarrays first.
+        - Handles warnings for suboptimal group numbers and prints ETC warnings if verbose mode is enabled.
+        - Updates `self.input_spec` with a PHOENIX stellar spectrum if `self.stellar_spec` is 'default'.
+        """
     
         if self.verbose: 
             print(self.target)    
@@ -201,16 +286,64 @@ class MIRIImaging_Observation_Eclipse:
         self.timing['cadence']  = cadence
         self.timing['nint']     = nint
         self.timing['ngroups']  = self.ngroups
+        self.timing['ngroups_sat'] = report['scalar']['sat_ngroups']
         self.timing['ref_wave'] = ref_wave
         self.timing['report']   = report
         self.timing['miri_imaging_ts'] = miri_imaging_ts
 
         return self.timing
 
-    def model_target_obs(self, ndraws=1000, Fp_Fs_from_model=False, convolve_model=False,
+    def model_target_obs(self, ndraws=1000, 
+                         Fp_Fs_from_model=False, fpfs_models=[], convolve_model=False,
                          Albedos=[], measurement_case='bare_rock',
                          display_figure=True, save_figure=False):
-        # ... (Same as the original `model_target_obs` function) ...
+        
+        """
+        Simulates and analyzes target observations for MIRI imaging eclipse measurements.
+        This method models the expected signal and noise for a given target, computes the eclipse depth,
+        and compares model predictions (bare rock and equilibrium temperature cases, or user-provided models)
+        to simulated measurements. It generates diagnostic plots of the light curve and planet/star flux ratio
+        across wavelength, and calculates statistical significance for model discrimination.
+        Parameters
+        ----------
+        ndraws : int, optional
+            Number of Monte Carlo draws for eclipse depth measurement simulation (default: 1000).
+        Fp_Fs_from_model : bool, optional
+            If True, uses externally provided model spectra for planet/star flux ratio (default: False).
+        models : dictionary, optional
+            If a dictionary is provided, will include these models
+            Dictionary should be of the form {'model_name': [wave, fpfs]],}
+            Wavelength should have units of length. Fp/Fs is unitless.
+        convolve_model : bool, optional
+            If False, no convolution of the model spectrum will occur (default: False)
+            If integer number, will use this value as the kernel in a Gaussian convolution.
+        Albedos : list of float, optional
+            List of albedo values (between 0 and 1) to use for bare rock and equilibrium models (default: []).
+        measurement_case : str, optional
+            Key for selecting which model case to use for simulated measurement (default: 'bare_rock').
+        display_figure : bool, optional
+            If True, displays diagnostic plots (default: True).
+        save_figure : bool, optional
+            If True, saves the generated figures to disk (default: False).
+        Returns
+        -------
+        None
+        Side Effects
+        ------------
+        - Updates self.models with model spectra, eclipse depths, chi-square, and significance values.
+        - Updates self.yerr_1obs and self.yerr_nobs with estimated measurement uncertainties.
+        - Optionally displays and/or saves diagnostic plots of the simulated light curve and Fp/Fs spectrum.
+        Raises
+        ------
+        AssertionError
+            If any provided albedo value is outside the range [0, 1].
+        Notes
+        -----
+        - Uses batman for light curve modeling.
+        - Assumes small eclipse depths (not suitable for transits or hot Jupiter eclipses).
+        - Requires several attributes to be set on self, including timing, target, input_spec, and filter information.
+        - The method is verbose if self.verbose is True, printing intermediate results and warnings.
+        """
 
         Albedos = np.array(Albedos)
         assert not np.any(Albedos > 1) and not np.any(Albedos<0), "Error: cannot have albedo greater than 1 or less than 0"
@@ -228,7 +361,7 @@ class MIRIImaging_Observation_Eclipse:
 
         # the wavelength and throughput of the designated filter
         bandpass_wave = report['1d']['fp'][0]
-        bandpass_flux = report['1d']['fp'][1]
+        bandpass_filt = report['1d']['fp'][1]
 
         # make a special dictionary, based off of the first MIRI dictionary, to get flux in useful units
         miri_imaging_ts_calibration = self.make_miri_calib_dict(miri_imaging_ts)
@@ -256,7 +389,6 @@ class MIRIImaging_Observation_Eclipse:
             print('    Fractional uncertainty,', noise_1obs/signal)
             print('    SNR', snr)
         
-            
         tstart = (self.target['pl_orbper']*u.day)*0.5 - (tdur/2) - (tdur*tfrac/2)
         tend   = (self.target['pl_orbper']*u.day)*0.5 + (tdur/2) + (tdur*tfrac/2)
         trange = tend - tstart
@@ -276,21 +408,27 @@ class MIRIImaging_Observation_Eclipse:
         self.models = OrderedDict()
         
         if Fp_Fs_from_model:
-            all_spec = self.get_all_model_spec(self.target, convolve_model=convolve_model)  # this is super specific to the models Joao made for the proposal 
 
-            for model in all_spec.keys():
-                wave = all_spec[model][0]
-                fpfs = all_spec[model][1]
+            for model_name in fpfs_models.keys():
                 
-                bandpass_inds = (wave>bandpass_wave[0]) * (wave<bandpass_wave[-1])
-                model_binned_to_bandpass = np.mean(fpfs[bandpass_inds])
+                if convolve_model != False:
+                    convolved_model_fpfs = convolve_model(fpfs_models[model_name], convolve_model)
+                    wave, fpfs = convolved_model_fpfs[0], convolved_model_fpfs[1]
+                else:
+                    wave, fpfs = fpfs_models[model_name][0], fpfs_models[model_name][1]
                 
-                self.models[model] = {}
-                self.models[model]['wave'] = wave
-                self.models[model]['fpfs'] = fpfs
-                self.models[model]['wave_band'] = ref_wave
-                self.models[model]['fpfs_band'] = model_binned_to_bandpass
+                bandpass_inds = (wave.to(u.micron).value>bandpass_wave[0]) * (wave.to(u.micron).value<bandpass_wave[-1])
+                model_wave_bandpass = wave[bandpass_inds]
+                model_fpfs_bandpass = fpfs[bandpass_inds]
 
+                model_averaged_in_bandpass = self.get_bandpass_avg_flux(model_wave_bandpass, model_fpfs_bandpass,
+                                                                        bandpass_wave*u.micron, bandpass_filt)
+                
+                self.models[model_name] = {}
+                self.models[model_name]['wave'] = wave
+                self.models[model_name]['fpfs'] = fpfs
+                self.models[model_name]['wave_band'] = ref_wave
+                self.models[model_name]['fpfs_band'] = model_averaged_in_bandpass
 
         wave_range = np.linspace(0.7, 25, 100) * u.micron
         for A in Albedos:
@@ -354,7 +492,10 @@ class MIRIImaging_Observation_Eclipse:
         line_styles = ['-', '--', ':']
 
         np.random.seed(50)
-        if Fp_Fs_from_model==False: measurement_case = f'{measurement_case}_{Albedos[0]}A'
+        if Fp_Fs_from_model==False: 
+            measurement_case = f'{measurement_case}_{Albedos[0]}A'
+        else:
+            measurement_case = list(fpfs_models.keys())[0]
         
         draw_eclipse_depth_measurement = np.random.normal(self.models[measurement_case]['fpfs_band'], yerr_nobs, ndraws)
 
@@ -439,11 +580,41 @@ class MIRIImaging_Observation_Eclipse:
             #figure['FpFs'].set_ylim(-10, 400)
 
         plname = self.target['pl_name'].replace(' ','')  # w/o spaces
-        if save_figure: plt.savefig(f'../sample/model_observations/{plname}_{filter}_{subarray}_{nobs}obs.png', facecolor='white')
+        if save_figure: plt.savefig(f'../sample/model_observations/{plname}_{self.filter}_{self.subarray}_{self.nobs}obs.png', facecolor='white')
         if display_figure: plt.show()
         #plt.close()
         
         return
+
+    def read_model_spectrum(self, filepath):
+        """
+        Reads a model spectrum file containing wavelength and flux information.
+        
+        Parameters
+        ----------
+        filepath : str
+            Path to the model spectrum file. File should be a space/tab-delimited
+            file with wavelength in first column and flux in second column.
+            
+        Returns
+        -------
+        tuple
+            A tuple containing (wavelength_array, flux_array) where:
+            - wavelength_array is in microns
+            - flux_array is in appropriate units for Fp/Fs ratio
+            
+        Notes
+        -----
+        This function is designed to read files like 'Trappist_1e_CH4_1bar_TOA_flux_eclipse.dat'
+        """
+        try:
+            data = np.loadtxt(filepath)
+            wavelength = data[:, 0]  # First column
+            flux = data[:, 1]        # Second column
+            return wavelength, flux
+        except Exception as e:
+            print(f"Error reading model file {filepath}: {str(e)}")
+            return None, None
 
     def get_bkg(self, ref_wave, make_new_bkg=True, savepath='./background/', verbose=False):
         """
@@ -595,8 +766,8 @@ class MIRIImaging_Observation_Eclipse:
         miri_imaging_ts['background'] = self.get_bkg(ref_wave)
         miri_imaging_ts['background_level'] = 'high' # let's keep it conservative
 
-        miri_imaging_ts['strategy']['aperture_size']  = 0.6259            # values from Gordon+ 2025
-        miri_imaging_ts['strategy']['sky_annulus']    = [0.949, 1.259]       # assuming MIRI plate scale of 0.11"/pix
+        miri_imaging_ts['strategy']['aperture_size']  = 0.55            # values from August+ 2025
+        miri_imaging_ts['strategy']['sky_annulus']    = [2.2, 4.95]       # assuming MIRI plate scale of 0.11"/pix
 
         if self.verbose: print('Returning MIRI dictionary')
         return miri_imaging_ts
@@ -766,30 +937,88 @@ class MIRIImaging_Observation_Eclipse:
             
         return all_spec
 
-    def get_all_model_spec(self, targ, convolve_model=False):
-        plnt_name = targ['pl_name'].replace(" ", "").replace("-", "")
-        print(targ['pl_name'], '-->', plnt_name)
+    def convolve_model_spec(self, model_spec, stddev):
         
-        modelspecpath = f'./models/{plnt_name.lower()}/'
-        speclist = np.sort(os.listdir(modelspecpath))
+        wave, fpfs = model_spec[0], model_spec[1]
         
-        all_spec = {}
-        for specfile in speclist:
-            model = ascii.read(modelspecpath + specfile, data_start=3)
+        g = Gaussian1DKernel(stddev=stddev)
+        z = convolve(fpfs, g)
+        fpfs_new = z
+
+        convolved_spec = np.array([wave, fpfs_new])
         
-            wave = model['col2']
-            Fp_Fs = model[model.colnames[-1]]
+        return convolve_model_spec
 
-            if convolve_model!=False:
-                g = Gaussian1DKernel(stddev=convolve_model)
-                z = convolve(Fp_Fs, g)
-                Fp_Fs = z
-
-            spec_name = specfile.split(".")[0]
-
-            all_spec[spec_name] = [wave, Fp_Fs]
+    def resample_flux_conserving(self, wave_in, flux_in, wave_out):
+        """
+        Resample a spectrum to a new wavelength grid while conserving total flux.
+        Uses specutils FluxConservingResampler for accurate flux conservation.
+        Handles NaN values by replacing them with zeros.
+        
+        Parameters
+        ----------
+        wave_in : Quantity
+            Input wavelength grid (must have units)
+        flux_in : Quantity
+            Input flux values (must have units)
+        wave_out : Quantity
+            Output wavelength grid (must have units, must be convertible to wave_in units)
             
-        return all_spec
+        Returns
+        -------
+        flux_out : Quantity
+            Resampled flux values with same units as flux_in
+        """
+        # Require units on all inputs
+        if not hasattr(wave_in, 'unit'):
+            raise ValueError("wave_in must be an Astropy Quantity with units")
+        if not hasattr(wave_out, 'unit'):
+            raise ValueError("wave_out must be an Astropy Quantity with units")
+        if not hasattr(flux_in, 'unit'):
+            raise ValueError("flux_in must be an Astropy Quantity with units")
+        
+        # Try to convert wave_out to same units as wave_in
+        try:
+            wave_out = wave_out.to(wave_in.unit)
+        except u.UnitConversionError:
+            raise ValueError(f"Cannot convert wave_out units ({wave_out.unit}) to wave_in units ({wave_in.unit}). "
+                            "Input wavelengths must have convertible units (e.g., Angstrom -> nm, but not Angstrom -> K)")
+        
+        # Replace NaN values with zeros in flux_in
+        flux_in = flux_in.copy()
+        flux_in[np.isnan(flux_in)] = 0 * flux_in.unit
+            
+        # Create Spectrum1D object
+        spec = Spectrum1D(spectral_axis=wave_in, flux=flux_in)
+        
+        # Create the resampler
+        resampler = FluxConservingResampler()
+        
+        # Create new spectral axis
+        new_spec = resampler(spec, wave_out)
+        
+        # Replace NaN values with zeros in output
+        flux_out = new_spec.flux
+        flux_out[np.isnan(flux_out)] = 0 * flux_out.unit
+        
+        return new_spec.__class__(spectral_axis=wave_out, flux=flux_out)
+
+    def get_bandpass_avg_flux(self, wave, fpfs, bandpass_wave, bandpass_filt):
+        """
+        Calculate a bandpass-averaged signal.
+        
+        """
+        # Resample flux_spec onto wave_filter using flux-conserving resampling
+        resampled_fpfs = self.resample_flux_conserving(wave, fpfs*u.dimensionless_unscaled, bandpass_wave).flux
+
+
+        # Calculate weighted average signal over the filter
+        weighted_signal = resampled_fpfs * bandpass_filt
+        sum_weighted_signal = np.sum(weighted_signal)
+        sum_filter_response = np.sum(bandpass_filt)
+        average_value = sum_weighted_signal / sum_filter_response
+
+        return average_value
         
     def grab_model_spec(targ, molecule='CO2', nbar=1):
         plnt_name = targ['pl_name'].replace(" ", "").replace("-", "")
