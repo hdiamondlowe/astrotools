@@ -11,7 +11,7 @@ def inc(a_Rs, b):
            impact paramter b []
     returns: inclination i [degrees]
     '''
-    return np.degrees(np.acos(b*(1./a_Rs)))
+    return np.degrees(np.arccos(b*(1./a_Rs)))
 
 def impact(a_Rs, i):
     '''
@@ -61,20 +61,58 @@ def Tdur(P, Rp_Rs, a_Rs, b=None, i=None):
 def Tdur_NEA(targ):
     '''
     Calculate transit (or eclipse) duration from dictionary formatted like NASA Exoplanet Archive
+    
+    Parameters
+    ----------
+    targ : dict
+        Dictionary containing planet parameters from NASA Exoplanet Archive
+        
+    Returns
+    -------
+    tdur : astropy.units.Quantity
+        Transit/eclipse duration
     '''
-    if targ['pl_ratror'] == None:
+    # Debug prints
+    print("Input parameters:")
+    print(f"Period: {targ.get('pl_orbper')} days")
+    print(f"Rp/Rs: {targ.get('pl_ratror')}")
+    print(f"a/Rs: {targ.get('pl_ratdor')}")
+    print(f"Inclination: {targ.get('pl_orbincl')} degrees")
+    
+    # Calculate Rp/Rs if not directly available
+    if targ['pl_ratror'] is None:
         print("Calculating Rp/Rs from separate Rp and Rs")
+        if targ.get('pl_rade') is None or targ.get('st_rad') is None:
+            raise ValueError("Missing planet radius (pl_rade) or stellar radius (st_rad)")
         Rp_Rs = ((targ['pl_rade']*u.R_earth)/(targ['st_rad']*u.R_sun)).decompose().value
-    else: Rp_Rs = targ['pl_ratror']
-    if targ['pl_ratdor'] == 0.0:
+        print(f"Calculated Rp/Rs = {Rp_Rs}")
+    else:
+        Rp_Rs = targ['pl_ratror']
+    
+    # Calculate a/Rs if not directly available
+    if hasattr(targ['pl_ratdor'], 'mask') and targ['pl_ratdor'].mask:
         print("Calculating a/Rs from separate a and Rs")
+        if targ.get('pl_orbsmax') is None or targ.get('st_rad') is None:
+            raise ValueError("Missing semi-major axis (pl_orbsmax) or stellar radius (st_rad)")
         a_Rs = ((targ['pl_orbsmax']*u.AU)/(targ['st_rad']*u.R_sun)).decompose().value
-    else: a_Rs = targ['pl_ratdor']
+        print(f"Calculated a/Rs = {a_Rs}")
+    else:
+        a_Rs = targ['pl_ratdor']
+    
+    # Handle inclination
+    if hasattr(targ['pl_orbincl'], 'mask') and targ['pl_orbincl'].mask:
+        print("Calculating inclination from a/Rs and impact parameter")
+        if targ.get('pl_imppar') is None:
+            raise ValueError("Missing impact parameter (pl_imppar)")
+        targ['pl_orbincl'] = inc(a_Rs, targ['pl_imppar'])
+        print(f"Calculated inclination = {targ['pl_orbincl']} degrees")
+        
+    # Calculate transit duration
     tdur = Tdur(P=targ['pl_orbper']*u.day, 
                 Rp_Rs=Rp_Rs,
                 a_Rs=a_Rs,
-                i = targ['pl_orbincl']
-                ) # event duration
+                i=targ['pl_orbincl']
+                )
     
     return tdur
 
@@ -93,7 +131,7 @@ def T23(P, Rp_Rs, a_Rs, b,  i=None):
     value = np.sqrt((1 - Rp_Rs)**2 - b**2) / a_Rs / np.sin(i)
     return P/np.pi * np.arcsin(value)
 
-def Tdur_ecc(P, Rp_Rs, a_Rs, e, w, b=None, i=None):
+def Tdur_ecc(P, Rp_Rs, a_Rs, e, w, b=None, i=None, eclipse=False):
 
     '''
     T14
@@ -116,13 +154,14 @@ def Tdur_ecc(P, Rp_Rs, a_Rs, e, w, b=None, i=None):
         b = impact(a_Rs, i)
         i = np.radians(i)
 
-    ecc_approx = np.sqrt(1 - e**2) / (1 + e*np.sin(w))
+    if eclipse: 
+        ecc_approx = np.sqrt(1 - e**2) / (1 - e*np.sin(w))
+    else:
+        ecc_approx = np.sqrt(1 - e**2) / (1 + e*np.sin(w))
 
     value = np.sqrt((1 + Rp_Rs)**2 - b**2) / a_Rs / np.sin(i)
 
-    return P/np.pi * np.arcsin(value) * ecc_approx
-
-
+    return P/(np.pi*u.rad) * np.arcsin(value) * ecc_approx
 
 
 def Teq(Teff, A, a_Rs, f=1/4):

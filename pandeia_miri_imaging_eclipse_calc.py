@@ -222,7 +222,7 @@ class MIRIImaging_Observation_Eclipse:
         elif self.find_best_subarray:
             for subarray in miri_arrays_descending:     
                 # make the pandeia dictionary for miri
-                if self.verbose: print(f'Testing subarray {subarray}')
+                if self.verbose: print(f'   ing subarray {subarray}')
                 miri_imaging_ts = self.make_miri_dict(subarray, scene_spec='input', input_spec=self.input_spec)
 
                 report = perform_calculation(miri_imaging_ts)
@@ -260,6 +260,7 @@ class MIRIImaging_Observation_Eclipse:
             print(report['warnings']) # should be empty if nothing is wrong
         
         tframe  = report['information']['exposure_specification']['tframe'] * u.s
+
         tint    = tframe * (self.ngroups - self.ngroups_remove)  # amount of time per integration
         treset  = (1+self.ngroups_remove) * tframe                                       # reset time between each integration
         cadence = tint + treset
@@ -290,13 +291,14 @@ class MIRIImaging_Observation_Eclipse:
         self.timing['ref_wave'] = ref_wave
         self.timing['report']   = report
         self.timing['miri_imaging_ts'] = miri_imaging_ts
+        #print()
 
         return self.timing
 
     def model_target_obs(self, ndraws=1000, 
                          Fp_Fs_from_model=False, fpfs_models=[], convolve_model=False,
-                         Albedos=[], measurement_case='bare_rock',
-                         display_figure=True, save_figure=False):
+                         Albedos=[], measurement_case=None,
+                         display_figure=True, save_figure=False, outputpath='./'):
         
         """
         Simulates and analyzes target observations for MIRI imaging eclipse measurements.
@@ -374,6 +376,7 @@ class MIRIImaging_Observation_Eclipse:
         snr = report['scalar']['sn']
         extracted_flux = report['scalar']['extracted_flux'] / u.s
         extracted_noise = report['scalar']['extracted_noise'] / u.s
+        self.snr = snr
 
         calibration_extracted_flux = report_calibration['scalar']['extracted_flux'] / u.s
         calibration_norm_value = report_calibration['input']['scene'][0]['spectrum']['normalization']['norm_flux']
@@ -416,7 +419,7 @@ class MIRIImaging_Observation_Eclipse:
                     wave, fpfs = convolved_model_fpfs[0], convolved_model_fpfs[1]
                 else:
                     wave, fpfs = fpfs_models[model_name][0], fpfs_models[model_name][1]
-                
+
                 bandpass_inds = (wave.to(u.micron).value>bandpass_wave[0]) * (wave.to(u.micron).value<bandpass_wave[-1])
                 model_wave_bandpass = wave[bandpass_inds]
                 model_fpfs_bandpass = fpfs[bandpass_inds]
@@ -438,13 +441,20 @@ class MIRIImaging_Observation_Eclipse:
             for case in ['bare_rock', 'equilibrium']:
                 T_day   = self.calc_Tday(A, atmo=case)
                 Fp_Fs   = self.calc_FpFs(T_day, wave_range, self.input_spec)
-                amp_day = self.calc_FpFs(T_day, ref_wave, self.input_spec)
+                #amp_day = self.calc_FpFs(T_day, ref_wave, self.input_spec)
+
+                bandpass_inds = (wave_range.to(u.micron).value>bandpass_wave[0]) * (wave_range.to(u.micron).value<bandpass_wave[-1])
+                model_wave_bandpass = wave_range[bandpass_inds]
+                model_fpfs_bandpass = Fp_Fs[bandpass_inds]
+
+                model_averaged_in_bandpass = self.get_bandpass_avg_flux(model_wave_bandpass, model_fpfs_bandpass,
+                                                                        bandpass_wave*u.micron, bandpass_filt)
 
                 self.models[case+f'_{A}A'] = {}
                 self.models[case+f'_{A}A']['wave']      = wave_range
                 self.models[case+f'_{A}A']['fpfs']      = Fp_Fs
                 self.models[case+f'_{A}A']['wave_band'] = ref_wave
-                self.models[case+f'_{A}A']['fpfs_band'] = amp_day
+                self.models[case+f'_{A}A']['fpfs_band'] = model_averaged_in_bandpass
                 self.models[case+f'_{A}A']['T_day']     = T_day
 
                 if self.verbose: print(case, ':', T_day)
@@ -492,10 +502,11 @@ class MIRIImaging_Observation_Eclipse:
         line_styles = ['-', '--', ':']
 
         np.random.seed(50)
-        if Fp_Fs_from_model==False: 
-            measurement_case = f'{measurement_case}_{Albedos[0]}A'
-        else:
-            measurement_case = list(fpfs_models.keys())[0]
+        if measurement_case==None:
+            if Fp_Fs_from_model==False: 
+                measurement_case = f'bare_rock_{Albedos[0]}A'
+            else:
+                measurement_case = list(fpfs_models.keys())[0]
         
         draw_eclipse_depth_measurement = np.random.normal(self.models[measurement_case]['fpfs_band'], yerr_nobs, ndraws)
 
@@ -545,8 +556,8 @@ class MIRIImaging_Observation_Eclipse:
             self.models[model]['sigma'] = sigma
             
             if display_figure:
-                figure['FpFs'].plot(self.models[model]['wave'], self.models[model]['fpfs'] *1e6, lw=3, color=f'C{i%10}', label=model+f', {sigma:.2f}$\sigma$')
-                figure['FpFs'].plot(self.models[model]['wave_band'].value, self.models[model]['fpfs_band']*1e6, 's', color=f'C{i%10}')
+                figure['FpFs'].plot(self.models[model]['wave'], self.models[model]['fpfs'] *1e6, lw=3, color=f'C{i%10}', label=model+f', {sigma:.2f}$\\sigma$')
+                figure['FpFs'].plot(self.models[model]['wave_band'].value, self.models[model]['fpfs_band']*1e6, 's', color=f'C{i%10}', markeredgecolor="darkgrey", markersize=6, label=None)
 
             # compare bare rock case to atmosphere case
         
@@ -567,8 +578,9 @@ class MIRIImaging_Observation_Eclipse:
             figure['lc'].set_ylim(-0.4*np.std(((signal_ts_scatter_1obs*flux/signal).value-1)*1e6), 1.5*np.std((signal_ts_scatter_1obs*flux/signal).value-1)*1e6)
             
             figure['FpFs'].legend(loc='upper left')
+            figure['FpFs'].plot(bandpass_wave, bandpass_filt/np.max(bandpass_filt)*10, lw=2, color='k', alpha=0.6)
             figure['FpFs'].set_ylabel('$F_p$/$F_s$ (ppm)', fontsize=14)
-            figure['FpFs'].set_xlabel('Wavelength ($\mu$m)', fontsize=14)
+            figure['FpFs'].set_xlabel('Wavelength ($\\mu$m)', fontsize=14)
         
             if Fp_Fs_from_model: figure['FpFs'].set_title(f'{nobs} obs', fontsize=16)
             else:
@@ -580,7 +592,7 @@ class MIRIImaging_Observation_Eclipse:
             #figure['FpFs'].set_ylim(-10, 400)
 
         plname = self.target['pl_name'].replace(' ','')  # w/o spaces
-        if save_figure: plt.savefig(f'../sample/model_observations/{plname}_{self.filter}_{self.subarray}_{self.nobs}obs.png', facecolor='white')
+        if save_figure: plt.savefig(f'./{outputpath}/{plname}_{self.filter}_{self.subarray}_{self.nobs}obs.png', facecolor='white')
         if display_figure: plt.show()
         #plt.close()
         
@@ -987,7 +999,7 @@ class MIRIImaging_Observation_Eclipse:
         # Replace NaN values with zeros in flux_in
         flux_in = flux_in.copy()
         flux_in[np.isnan(flux_in)] = 0 * flux_in.unit
-            
+
         # Create Spectrum1D object
         spec = Spectrum1D(spectral_axis=wave_in, flux=flux_in)
         
