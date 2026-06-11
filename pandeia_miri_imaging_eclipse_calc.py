@@ -12,7 +12,7 @@ from astropy.time import Time
 from specutils import Spectrum1D
 from specutils.manipulation import FluxConservingResampler
 from scipy import stats, interpolate
-import pysynphot
+import stsynphot as stsyn
 import pickle
 import json
 import copy
@@ -206,10 +206,11 @@ class MIRIImaging_Observation_Eclipse:
         if self.verbose: print('Approximate observing time per eclipse observation:', approx_obs_time)
 
         if self.stellar_spec == 'default':
-            Phoenix_spec = pysynphot.Icat('phoenix', Teff=self.target['st_teff'], metallicity=0.0, log_g=self.target['st_logg'])
-            Phoenix_spec.convert('flam')
-            wave = Phoenix_spec.wave * u.Angstrom
-            flux = Phoenix_spec.flux * u.erg/u.cm**2/u.s/u.Angstrom
+            Phoenix_spec = stsyn.grid_to_spec('phoenix', self.target['st_teff'], 0.0, self.target['st_logg'])
+            wave = Phoenix_spec.waveset  # in Angstrom
+            flux = Phoenix_spec(wave, flux_unit='flam')  # erg/s/cm^2/AA
+            #wave = Phoenix_spec.wave * u.Angstrom
+            #flux = Phoenix_spec.flux * u.erg/u.cm**2/u.s/u.Angstrom
             flux *= wave**2 / const.c
 
             self.input_spec = np.array([wave.to(u.um).value, flux.to(u.mJy).value])
@@ -779,7 +780,7 @@ class MIRIImaging_Observation_Eclipse:
         miri_imaging_ts['background_level'] = 'high' # let's keep it conservative
 
         miri_imaging_ts['strategy']['aperture_size']  = 0.55            # values from August+ 2025
-        miri_imaging_ts['strategy']['sky_annulus']    = [2.2, 4.95]       # assuming MIRI plate scale of 0.11"/pix
+        miri_imaging_ts['strategy']['sky_annulus']    = [1.1, 2.42]       # assuming MIRI plate scale of 0.11"/pix
 
         if self.verbose: print('Returning MIRI dictionary')
         return miri_imaging_ts

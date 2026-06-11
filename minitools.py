@@ -66,9 +66,7 @@ def bin_timeseries(t, y, yerr, bin_size=None, num_bin=None):
             bin_day = float(bin_size.to_value(t.unit))
         else:
             bin_day = float(bin_size)
-        edges = np.arange(tmin, tmax + bin_day, bin_day)
-        if edges[-1] < tmax:
-            edges = np.append(edges, edges[-1] + bin_day)
+        edges = np.arange(tmin, tmax, bin_day)
     else:
         edges = np.linspace(tmin, tmax, num_bin + 1)
 

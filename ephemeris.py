@@ -13,7 +13,7 @@ from astropy.io import ascii
 import pytz
 import datetime
 from astropy.time import Time
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz, get_sun, get_moon
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz, get_sun, get_body
 
 def event_time_calculator(input_file, start_time='now', end_time='week', output=False, bad_transit_flag=True, make_latex_table=False, obstimes=False):
 
@@ -165,8 +165,8 @@ def event_time_calculator(input_file, start_time='now', end_time='week', output=
             sun_mdpt = get_sun(Time(mdpt, format='jd', scale='utc')).transform_to(objframe_mdpt)
             solar_altitudes.append(sun_mdpt.alt)
 
-            moon = get_moon(Time(mdpt+deltamdpt, format='jd', scale='utc')).transform_to(objframe)
-            moon_mdpt = get_moon(Time(mdpt, format='jd', scale='utc')).transform_to(objframe_mdpt)
+            moon = get_body('moon', Time(mdpt+deltamdpt, format='jd', scale='utc')).transform_to(objframe)
+            moon_mdpt = get_body('moon', Time(mdpt, format='jd', scale='utc')).transform_to(objframe_mdpt)
             mdpt_separation = moon_mdpt.separation(coord).deg
 
 
